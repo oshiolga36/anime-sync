@@ -21,7 +21,9 @@ pipeline {
         stage('deps') {
             steps {
                 // Same upgrade the cron line did, into $HOME/.local (persisted volume).
-                sh 'pip install --user --break-system-packages --upgrade anipy-api anipy-cli'
+                // rich/pyyaml are imported directly by the scripts and are NOT
+                // guaranteed transitive deps of anipy — pin them here explicitly.
+                sh 'pip install --user --break-system-packages --upgrade anipy-api anipy-cli rich pyyaml'
             }
         }
 
