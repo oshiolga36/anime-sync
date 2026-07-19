@@ -6,8 +6,8 @@ def notify(String text) {
     withEnv(["MSG=${text}"]) {
         sh '''
             set +x
-            [ -r /var/jenkins_home/bot.env ] || exit 0
-            . /var/jenkins_home/bot.env
+            [ -r /srv/bot-secrets/bot.env ] || exit 0
+            . /srv/bot-secrets/bot.env
             # skip silently while TELEGRAM_CHAT_ID is unset or still the placeholder
             case "$TELEGRAM_CHAT_ID" in ''|*[!0-9-]*) exit 0 ;; esac
             [ -n "$TELEGRAM_TOKEN" ] || exit 0
