@@ -1,7 +1,8 @@
 pipeline {
     agent any
 
-    triggers { cron('H H/2 * * *') }   // every 2h, same as the old crontab line
+    // ponytail: manual-only, no triggers block. Re-add
+    // `triggers { cron('H H/2 * * *') }` here to go back to every-2h.
 
     environment {
         // State the sync writes (last downloaded episode per show). Kept OUTSIDE
