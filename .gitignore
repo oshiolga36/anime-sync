@@ -1,0 +1,4 @@
+# state the job writes — lives in /var/jenkins_home/anime-state, never committed
+watchlist.json
+download_state.json
+*.log
