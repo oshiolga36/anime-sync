@@ -44,6 +44,12 @@ def build(summary: dict) -> str:
     return "\n".join(lines) + "\n" + tail
 
 
+def changed(summary: dict) -> bool:
+    """True if this run actually did something worth interrupting someone for."""
+    stats = summary.get("stats", {})
+    return bool(stats.get("downloaded") or stats.get("failed"))
+
+
 def demo() -> None:
     out = build({
         "stats": {"downloaded": 3, "skipped": 55, "failed": 1},
@@ -60,13 +66,25 @@ def demo() -> None:
     assert "3 downloaded, 55 up to date, 1 failed" in out, out
     assert "Nothing new" in build({"stats": {}, "shows": []})
     assert fmt_eps([1, 2, 3, 4, 5, 6, 7, 8]) == "E01, E02, E03, E04, E05, E06 +2 more"
+
+    assert changed({"stats": {"downloaded": 1, "failed": 0}})
+    assert changed({"stats": {"downloaded": 0, "failed": 2}})       # breakage is news
+    assert not changed({"stats": {"downloaded": 0, "skipped": 57}})  # idle run
+    assert not changed({})
     print("summary_text ok")
 
 
 if __name__ == "__main__":
     if "--selfcheck" in sys.argv:
         demo()
-    else:
-        f = Path(__file__).parent / "summary.json"
-        if f.exists():
-            print(build(json.loads(f.read_text(encoding="utf-8"))))
+        sys.exit(0)
+
+    f = Path(__file__).parent / "summary.json"
+    summary = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+    if "--changed" in sys.argv:
+        # exit 0 = worth notifying about, 1 = idle run. No summary = idle.
+        sys.exit(0 if summary and changed(summary) else 1)
+
+    if summary:
+        print(build(summary))

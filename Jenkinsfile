@@ -25,11 +25,22 @@ def summaryBody() {
     return sh(script: 'python3 summary_text.py 2>/dev/null || true', returnStdout: true).trim()
 }
 
+// Did this run download anything or hit an error? Idle runs are not news.
+def changed() {
+    return sh(script: 'python3 summary_text.py --changed', returnStatus: true) == 0
+}
+
+// Scheduled runs stay quiet when nothing happened (12 builds/day, mostly idle).
+// Manual runs always report back — you pressed the button, silence is ambiguous.
+def scheduled() {
+    return currentBuild.getBuildCauses('hudson.triggers.TimerTrigger$TimerTriggerCause').size() > 0
+}
+
 pipeline {
     agent any
 
-    // ponytail: manual-only, no triggers block. Re-add
-    // `triggers { cron('H H/2 * * *') }` here to go back to every-2h.
+    // Every 2h, same cadence as the old crontab line. H spreads the load off :00.
+    triggers { cron('H H/2 * * *') }
 
     environment {
         // State the sync writes (last downloaded episode per show). Kept OUTSIDE
@@ -80,7 +91,13 @@ pipeline {
         always {
             sh 'mkdir -p "$STATE"; [ -f watchlist.json ] && cp watchlist.json "$STATE/watchlist.json" || true'
         }
-        success { notify("✅ #${env.BUILD_NUMBER} ok (${currentBuild.durationString.replace(' and counting', '')})\n${summaryBody()}") }
+        success {
+            script {
+                if (changed() || !scheduled()) {
+                    notify("✅ #${env.BUILD_NUMBER} ok (${currentBuild.durationString.replace(' and counting', '')})\n${summaryBody()}")
+                }
+            }
+        }
         failure { notify("❌ #${env.BUILD_NUMBER} FAILED\n${summaryBody()}\n${env.BUILD_URL}console") }
         aborted { notify("⚠️ #${env.BUILD_NUMBER} aborted (timeout or cancelled)\n${summaryBody()}") }
     }
