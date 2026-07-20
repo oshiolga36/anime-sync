@@ -30,6 +30,12 @@ def syncState() {
     return sh(script: 'python3 summary_text.py --state', returnStdout: true).trim()
 }
 
+// ['notify'|'suppress'|'recovered'|'quiet', <recovered titles>] from post/always
+def alert() {
+    def lines = readFile('alert.txt').trim().split('\n')
+    return [lines[0], lines.size() > 1 ? lines[1] : '']
+}
+
 // Scheduled runs stay quiet when nothing happened (12 builds/day, mostly idle).
 // Manual runs always report back — you pressed the button, silence is ambiguous.
 def scheduled() {
@@ -104,11 +110,18 @@ pipeline {
         // recorded, so a retry does not fetch them again.
         always {
             sh 'mkdir -p "$STATE"; [ -f watchlist.json ] && cp watchlist.json "$STATE/watchlist.json" || true'
+            // Computed once here (post `always` runs before the status branches)
+            // because it UPDATES the stored signature — calling it per branch
+            // would compare a signature against itself and suppress everything.
+            sh 'python3 summary_text.py --check-alert > alert.txt 2>/dev/null || echo notify > alert.txt'
         }
         success {
             script {
                 def took = currentBuild.durationString.replace(' and counting', '')
-                if (syncState() == 'new') {
+                def (verdict, fixed) = alert()
+                if (verdict == 'recovered') {
+                    notify("💚 Downloads are working again — ${fixed}\n\n${summaryBody()}")
+                } else if (syncState() == 'new') {
                     notify("🍿 New episodes are in — took ${took}\n\n${summaryBody()}")
                 } else if (!scheduled()) {
                     // manual run with nothing to do: confirm it ran, don't pretend it did work
@@ -118,11 +131,15 @@ pipeline {
         }
         unstable {
             script {
-                // some shows failed. Always report, scheduled or not: a provider that
-                // stopped working stays broken until someone looks at it.
-                def head = syncState() == 'mixed' ? "⚠️ Some episodes arrived, some shows failed"
-                                                  : "⚠️ Nothing downloaded — shows are failing"
-                notify("${head}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
+                def (verdict, _) = alert()
+                // Same shows failing the same way as last run: stay quiet. 12 identical
+                // alerts a day is how people learn to ignore alerts. A manual run always
+                // answers, and any CHANGE in what is broken breaks through.
+                if (verdict != 'suppress' || !scheduled()) {
+                    def head = syncState() == 'mixed' ? "⚠️ Some episodes arrived, some shows failed"
+                                                      : "⚠️ Nothing downloaded — shows are failing"
+                    notify("${head}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
+                }
             }
         }
         failure {
