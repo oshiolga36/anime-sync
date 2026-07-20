@@ -30,7 +30,7 @@ def build(summary: dict) -> str:
         if s.get("status") == "failed":
             lines.append(f"! {s['title']}: {s.get('detail', 'failed')}")
         elif s.get("errors"):
-            lines.append(f"! {s['title']}: {len(s['errors'])} episode(s) failed")
+            lines.append(f"! {s['title']}: {len(s['errors'])} episode(s) failed, will retry")
 
     if len(shows) > MAX_SHOWS:
         lines.append(f"…and {len(shows) - MAX_SHOWS} more")
@@ -61,7 +61,7 @@ def demo() -> None:
     })
     assert "Frieren: E14, E15" in out, out
     assert "Dandadan: E07" in out, out
-    assert "! Dandadan: 1 episode(s) failed" in out, out
+    assert "! Dandadan: 1 episode(s) failed, will retry" in out, out
     assert "! Bocchi: no provider match" in out, out
     assert "3 downloaded, 55 up to date, 1 failed" in out, out
     assert "Nothing new" in build({"stats": {}, "shows": []})

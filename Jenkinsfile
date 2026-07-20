@@ -99,12 +99,20 @@ pipeline {
         }
         success {
             script {
-                if (changed() || !scheduled()) {
-                    notify("✅ #${env.BUILD_NUMBER} ok (${currentBuild.durationString.replace(' and counting', '')})\n${summaryBody()}")
+                def took = currentBuild.durationString.replace(' and counting', '')
+                if (changed()) {
+                    notify("🍿 New episodes are in — took ${took}\n\n${summaryBody()}")
+                } else if (!scheduled()) {
+                    // manual run with nothing to do: confirm it ran, don't pretend it did work
+                    notify("😴 All caught up — nothing new (${took})\n\n${summaryBody()}")
                 }
             }
         }
-        failure { notify("❌ #${env.BUILD_NUMBER} FAILED\n${summaryBody()}\n${env.BUILD_URL}console") }
-        aborted { notify("⚠️ #${env.BUILD_NUMBER} aborted (timeout or cancelled)\n${summaryBody()}") }
+        failure {
+            notify("🔥 Sync broke — build ${env.BUILD_NUMBER}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
+        }
+        aborted {
+            notify("⏱ Sync stopped early — build ${env.BUILD_NUMBER} hit the 2h limit or was cancelled\n\n${summaryBody()}")
+        }
     }
 }

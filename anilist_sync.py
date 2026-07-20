@@ -106,6 +106,23 @@ def update_aliases(anilist_anime: AniListAnime, folder_name: str, alias_path: Pa
             f.write(f"{q(k)}: {q(canonical)}\n")
 
 
+def contiguous_watermark(last_downloaded, new_eps: list, ok_eps: set):
+    """Highest episode reachable from `last_downloaded` through UNBROKEN successes.
+
+    `last_downloaded` is a high-water mark: everything at or below it is treated
+    as done forever, and next run only looks past it. So it must never cross an
+    episode that failed — otherwise that episode is skipped permanently and the
+    gap is silent until you try to watch it. Stop at the first miss and let the
+    next run retry from there.
+    """
+    hw = last_downloaded
+    for ep in new_eps:
+        if ep not in ok_eps:
+            break
+        hw = ep
+    return hw
+
+
 def load_watchlist(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -315,10 +332,23 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
             valid_folder = Downloader._get_valid_pathname(folder_name)
             eps_ok = 0
             got, lost = [], []
+            ok_eps = set()
+
+            def advance_watermark():
+                watchlist[key]["last_downloaded"] = contiguous_watermark(
+                    last_downloaded, new_eps, ok_eps
+                )
+                save_watchlist(watchlist_path, watchlist)
+
             for ep in new_eps:
                 try:
                     stream = anime.get_video(ep, lang)
                     if stream is None:
+                        # no stream is a failure, not a silent skip: it must block the
+                        # watermark so the next run retries this episode
+                        progress.console.print(f"  [red]![/] No stream for episode {ep}")
+                        stats["failed"] += 1
+                        lost.append(ep)
                         continue
 
                     filename = config.download_name_format.format(
@@ -344,8 +374,8 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
                     progress.update(ep_task_id, visible=False)
                     state["ep_task_id"] = None
 
-                    watchlist[key]["last_downloaded"] = ep
-                    save_watchlist(watchlist_path, watchlist)
+                    ok_eps.add(ep)
+                    advance_watermark()
                     eps_ok += 1
                     got.append(ep)
                     stats["downloaded"] += 1
@@ -412,5 +442,25 @@ def main() -> None:
     sync_all(anilist_obj, watchlist_path)
 
 
+def demo() -> None:
+    cw = contiguous_watermark
+    # all succeed -> advance to the end
+    assert cw(3, [4, 5, 6], {4, 5, 6}) == 6
+    # the regression this guards: 5 fails, 6 succeeds -> must NOT jump to 6,
+    # or episode 5 is never retried
+    assert cw(4, [5, 6], {6}) == 4
+    # partial run: 5 and 6 land, 7 fails
+    assert cw(4, [5, 6, 7], {5, 6}) == 6
+    # nothing landed -> unchanged
+    assert cw(4, [5, 6], set()) == 4
+    # first-ever sync starts at -1
+    assert cw(-1, [1, 2, 3], {1, 2, 3}) == 3
+    assert cw(-1, [1, 2, 3], {2, 3}) == -1
+    print("watermark ok")
+
+
 if __name__ == "__main__":
-    main()
+    if "--selfcheck" in sys.argv:
+        demo()
+    else:
+        main()
