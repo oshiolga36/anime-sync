@@ -68,13 +68,19 @@ pipeline {
 
         stage('sync') {
             steps {
-                sh '''
-                    mkdir -p "$STATE"
-                    # stale summary from the previous build must not be reported as this one's
-                    rm -f summary.json
-                    [ -f "$STATE/watchlist.json" ] && cp "$STATE/watchlist.json" watchlist.json
-                    python3 anilist_sync.py
-                '''
+                // The old crontab chained with `;` so the consolidator ran even when
+                // the sync died — which is exactly when half-downloaded episodes are
+                // sitting unorganised. catchError keeps that behaviour: the build
+                // still goes red, but the consolidate stage still runs.
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    sh '''
+                        mkdir -p "$STATE"
+                        # stale summary from the previous build must not be reported as this one's
+                        rm -f summary.json
+                        [ -f "$STATE/watchlist.json" ] && cp "$STATE/watchlist.json" watchlist.json
+                        python3 anilist_sync.py
+                    '''
+                }
             }
         }
 
