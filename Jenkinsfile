@@ -19,6 +19,12 @@ def notify(String text) {
     }
 }
 
+// Body of the notification: which titles were downloaded / failed.
+// Falls back to empty (terse header only) if the sync never wrote a summary.
+def summaryBody() {
+    return sh(script: 'python3 summary_text.py 2>/dev/null || true', returnStdout: true).trim()
+}
+
 pipeline {
     agent any
 
@@ -53,6 +59,8 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p "$STATE"
+                    # stale summary from the previous build must not be reported as this one's
+                    rm -f summary.json
                     [ -f "$STATE/watchlist.json" ] && cp "$STATE/watchlist.json" watchlist.json
                     python3 anilist_sync.py
                 '''
@@ -72,8 +80,8 @@ pipeline {
         always {
             sh 'mkdir -p "$STATE"; [ -f watchlist.json ] && cp watchlist.json "$STATE/watchlist.json" || true'
         }
-        success { notify("✅ ${env.JOB_NAME} #${env.BUILD_NUMBER} ok (${currentBuild.durationString.replace(' and counting', '')})") }
-        failure { notify("❌ ${env.JOB_NAME} #${env.BUILD_NUMBER} FAILED\n${env.BUILD_URL}console") }
-        aborted { notify("⚠️ ${env.JOB_NAME} #${env.BUILD_NUMBER} aborted (timeout or cancelled)") }
+        success { notify("✅ #${env.BUILD_NUMBER} ok (${currentBuild.durationString.replace(' and counting', '')})\n${summaryBody()}") }
+        failure { notify("❌ #${env.BUILD_NUMBER} FAILED\n${summaryBody()}\n${env.BUILD_URL}console") }
+        aborted { notify("⚠️ #${env.BUILD_NUMBER} aborted (timeout or cancelled)\n${summaryBody()}") }
     }
 }

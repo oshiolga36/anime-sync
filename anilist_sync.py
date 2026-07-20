@@ -251,6 +251,10 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
         )
 
         stats = {"downloaded": 0, "skipped": 0, "failed": 0, "shows_with_new": 0}
+        # Per-show outcome, written to summary.json for the Jenkins notifier.
+        # Structured rather than scraped from the console: rich's output is for
+        # humans and reformatting it would silently break the notifications.
+        report = []
 
         for key, title, anilist_anime in items_to_sync:
             progress.update(overall_task, description=f"Syncing: {title}")
@@ -269,6 +273,7 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
                 mapping = None
             if mapping is None:
                 stats["failed"] += 1
+                report.append({"title": title, "status": "failed", "detail": "no provider match"})
                 progress.advance(overall_task)
                 continue
 
@@ -286,6 +291,7 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
             except Exception as e:
                 progress.console.print(f"  [red]![/] Could not fetch episodes: {e}")
                 stats["failed"] += 1
+                report.append({"title": title, "status": "failed", "detail": f"episode list: {e}"})
                 progress.advance(overall_task)
                 continue
 
@@ -308,6 +314,7 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
 
             valid_folder = Downloader._get_valid_pathname(folder_name)
             eps_ok = 0
+            got, lost = [], []
             for ep in new_eps:
                 try:
                     stream = anime.get_video(ep, lang)
@@ -340,19 +347,31 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
                     watchlist[key]["last_downloaded"] = ep
                     save_watchlist(watchlist_path, watchlist)
                     eps_ok += 1
+                    got.append(ep)
                     stats["downloaded"] += 1
                 except Exception as e:
                     progress.update(ep_task_id, visible=False)
                     state["ep_task_id"] = None
                     progress.console.print(f"  [red]![/] Error downloading episode {ep}: {e}")
                     stats["failed"] += 1
+                    lost.append(ep)
                     continue
 
             if eps_ok:
                 progress.console.print(f"  [green]✓[/] Downloaded {eps_ok} episode(s)")
                 stats["shows_with_new"] += 1
 
+            if got or lost:
+                report.append({"title": title, "status": "downloaded", "episodes": got, "errors": lost})
+
             progress.advance(overall_task)
+
+    # Written even when nothing happened, so a stale summary from a previous run
+    # can never be reported as if it were this one's.
+    summary_path = Path(__file__).parent / "summary.json"
+    summary_path.write_text(
+        json.dumps({"stats": stats, "shows": report}, indent=2), encoding="utf-8"
+    )
 
     console.rule("[bold blue]Sync Complete[/]")
     table = Table(show_header=False, box=None, padding=(0, 2))
