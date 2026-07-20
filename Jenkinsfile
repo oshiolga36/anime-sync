@@ -25,9 +25,9 @@ def summaryBody() {
     return sh(script: 'python3 summary_text.py 2>/dev/null || true', returnStdout: true).trim()
 }
 
-// Did this run download anything or hit an error? Idle runs are not news.
-def changed() {
-    return sh(script: 'python3 summary_text.py --changed', returnStatus: true) == 0
+// new / mixed / errors / idle / unknown — see summary_text.py
+def syncState() {
+    return sh(script: 'python3 summary_text.py --state', returnStdout: true).trim()
 }
 
 // Scheduled runs stay quiet when nothing happened (12 builds/day, mostly idle).
@@ -81,6 +81,14 @@ pipeline {
                         python3 anilist_sync.py
                     '''
                 }
+                // anilist_sync exits 0 even when individual shows fail, so the shell
+                // result alone reports a green build over a broken sync. Grade the
+                // build on what actually happened.
+                script {
+                    if (syncState() in ['errors', 'mixed']) {
+                        unstable('one or more shows failed to sync')
+                    }
+                }
             }
         }
 
@@ -100,12 +108,21 @@ pipeline {
         success {
             script {
                 def took = currentBuild.durationString.replace(' and counting', '')
-                if (changed()) {
+                if (syncState() == 'new') {
                     notify("🍿 New episodes are in — took ${took}\n\n${summaryBody()}")
                 } else if (!scheduled()) {
                     // manual run with nothing to do: confirm it ran, don't pretend it did work
                     notify("😴 All caught up — nothing new (${took})\n\n${summaryBody()}")
                 }
+            }
+        }
+        unstable {
+            script {
+                // some shows failed. Always report, scheduled or not: a provider that
+                // stopped working stays broken until someone looks at it.
+                def head = syncState() == 'mixed' ? "⚠️ Some episodes arrived, some shows failed"
+                                                  : "⚠️ Nothing downloaded — shows are failing"
+                notify("${head}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
             }
         }
         failure {

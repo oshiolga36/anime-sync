@@ -44,10 +44,24 @@ def build(summary: dict) -> str:
     return "\n".join(lines) + "\n" + tail
 
 
-def changed(summary: dict) -> bool:
-    """True if this run actually did something worth interrupting someone for."""
+def state(summary: dict) -> str:
+    """Classify the run: new / mixed / errors / idle / unknown.
+
+    'downloaded > 0' and 'failed > 0' are independent — a run can do both, and
+    reporting only "something changed" produced messages claiming new episodes
+    when in fact everything had failed.
+    """
+    if not summary:
+        return "unknown"
     stats = summary.get("stats", {})
-    return bool(stats.get("downloaded") or stats.get("failed"))
+    got, bad = stats.get("downloaded", 0), stats.get("failed", 0)
+    if got and bad:
+        return "mixed"
+    if got:
+        return "new"
+    if bad:
+        return "errors"
+    return "idle"
 
 
 def demo() -> None:
@@ -67,10 +81,12 @@ def demo() -> None:
     assert "Nothing new" in build({"stats": {}, "shows": []})
     assert fmt_eps([1, 2, 3, 4, 5, 6, 7, 8]) == "E01, E02, E03, E04, E05, E06 +2 more"
 
-    assert changed({"stats": {"downloaded": 1, "failed": 0}})
-    assert changed({"stats": {"downloaded": 0, "failed": 2}})       # breakage is news
-    assert not changed({"stats": {"downloaded": 0, "skipped": 57}})  # idle run
-    assert not changed({})
+    assert state({"stats": {"downloaded": 1, "failed": 0}}) == "new"
+    assert state({"stats": {"downloaded": 2, "failed": 3}}) == "mixed"
+    # the regression: all-failures must NOT read as "new episodes are in"
+    assert state({"stats": {"downloaded": 0, "failed": 6}}) == "errors"
+    assert state({"stats": {"downloaded": 0, "skipped": 57}}) == "idle"
+    assert state({}) == "unknown"
     print("summary_text ok")
 
 
@@ -82,9 +98,9 @@ if __name__ == "__main__":
     f = Path(__file__).parent / "summary.json"
     summary = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
-    if "--changed" in sys.argv:
-        # exit 0 = worth notifying about, 1 = idle run. No summary = idle.
-        sys.exit(0 if summary and changed(summary) else 1)
+    if "--state" in sys.argv:
+        print(state(summary))
+        sys.exit(0)
 
     if summary:
         print(build(summary))
