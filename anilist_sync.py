@@ -398,9 +398,20 @@ def sync_all(anilist_obj: Optional[AniList], watchlist_path: Path) -> None:
 
     # Written even when nothing happened, so a stale summary from a previous run
     # can never be reported as if it were this one's.
+    # anipy-api is upgraded on every run, so it is the usual suspect when a sync
+    # that worked yesterday stops working. Recording it turns "did anipy change?"
+    # into a fact in the notification instead of an investigation.
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        anipy_version = _pkg_version("anipy-api")
+    except Exception:
+        anipy_version = "?"
+
     summary_path = Path(__file__).parent / "summary.json"
     summary_path.write_text(
-        json.dumps({"stats": stats, "shows": report}, indent=2), encoding="utf-8"
+        json.dumps({"stats": stats, "shows": report, "anipy": anipy_version}, indent=2),
+        encoding="utf-8",
     )
 
     console.rule("[bold blue]Sync Complete[/]")

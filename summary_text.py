@@ -46,6 +46,8 @@ def build(summary: dict) -> str:
     tail = f"{stats.get('downloaded', 0)} downloaded, {stats.get('skipped', 0)} up to date"
     if stats.get("failed"):
         tail += f", {stats['failed']} failed"
+    if summary.get("anipy"):
+        tail += f" · anipy {summary['anipy']}"
     return "\n".join(lines) + "\n" + tail
 
 
@@ -99,6 +101,7 @@ def titles(sig: list) -> list:
 def demo() -> None:
     out = build({
         "stats": {"downloaded": 3, "skipped": 55, "failed": 1},
+        "anipy": "3.8.18",
         "shows": [
             {"title": "Frieren", "status": "downloaded", "episodes": [14, 15], "errors": []},
             {"title": "Dandadan", "status": "downloaded", "episodes": [7], "errors": [8]},
@@ -109,7 +112,9 @@ def demo() -> None:
     assert "Dandadan: E07" in out, out
     assert "! Dandadan: 1 episode(s) failed, will retry" in out, out
     assert "! Bocchi: no provider match" in out, out
-    assert "3 downloaded, 55 up to date, 1 failed" in out, out
+    assert "3 downloaded, 55 up to date, 1 failed · anipy 3.8.18" in out, out
+    # older summaries have no anipy field — must not print "anipy None"
+    assert "anipy" not in build({"stats": {"downloaded": 1}, "shows": []}), "leaked anipy"
     assert "Nothing new" in build({"stats": {}, "shows": []})
     assert fmt_eps([1, 2, 3, 4, 5, 6, 7, 8]) == "E01, E02, E03, E04, E05, E06 +2 more"
 
