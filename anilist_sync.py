@@ -38,6 +38,75 @@ from anipy_api.provider import LanguageTypeEnum, list_providers
 from anipy_cli.config import Config
 from anipy_cli.util import get_prefered_providers
 
+# Upstream's keygen CI publishes query_hash: null (its ${...} resolver doesn't recurse
+# into the `Lr()` helper branch, which now nests ${Od}), so get_video sends
+# sha256Hash: null -> PersistedQueryNotFound and every show fails with "no stream".
+# Recompute the hash from the live chunk.js and splice it in. Self-disables once
+# upstream publishes a non-null hash again.
+# ponytail: still trusts upstream keygen.json for key/epoch/lane/build_id; if that
+# goes stale too, port the rest of scripts/keygen/keygen.py (needs node + ani-extract).
+def _patch_allanime_query_hash():
+    import functools
+    import hashlib
+    import re
+
+    import requests
+
+    import anipy_api.provider.providers.allanime_provider as _aa
+
+    CDN = "https://cdn.mkissa.net/all/mk/_app/immutable"
+    UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+    def scrape_query_hash():
+        s, h = requests.Session(), {"User-Agent": UA}
+        html = s.get("https://mkissa.to/", headers=h, timeout=15).text
+        app = CDN + re.search(r"/entry/app\.[A-Za-z0-9_.-]+\.js", html).group()
+        app_js = s.get(app, headers=h, timeout=15).text
+        for chunk in re.findall(r'"\.\./(chunks/[A-Za-z0-9_.-]+\.js)"', app_js)[:5]:
+            js = s.get(f"{CDN}/{chunk}", headers=h, timeout=15).text
+            if "VaildTranslationTypeEnumType" not in js and "x-aa-boot" not in js:
+                continue
+            tmpl = next(
+                (t for t in re.findall(r"(\nquery\([^`]*)`", js)
+                 if "sourceUrls" in t and "episode(" in t),
+                None,
+            )
+            if tmpl is None:
+                return None
+
+            def resolve(t, depth=0):
+                if depth > 12:
+                    return t
+                for name in re.findall(r"\$\{([^}]+)\}", t):
+                    if name.endswith("()"):
+                        m = re.search(
+                            re.escape(name[:-2])
+                            + r"\s*=\s*\w+\s*=>\s*\w+\s*\?\s*`[^`]*`\s*:\s*`([^`]*)`",
+                            js,
+                        )
+                    else:
+                        m = re.search(re.escape(name) + r"\s*=\s*`([^`]*)`", js)
+                    t = t.replace("${" + name + "}", resolve(m.group(1), depth + 1) if m else "")
+                return t
+
+            query = resolve(tmpl)
+            return None if "${" in query else hashlib.sha256(query.encode()).hexdigest()
+        return None
+
+    _orig = _aa.fetch_keygen
+
+    @functools.lru_cache()
+    def fetch_keygen(session):
+        keygen = dict(_orig(session))
+        if not keygen.get("query_hash"):
+            keygen["query_hash"] = scrape_query_hash()
+        return keygen
+
+    _aa.fetch_keygen = fetch_keygen
+
+
+_patch_allanime_query_hash()
+
 console = Console()
 
 
