@@ -267,6 +267,9 @@ sync_state="${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/sync_wate
 # Read-only floor so this never redownloads what the Jenkins pipeline already
 # has - never written to, so it can't corrupt the main pipeline's state.
 main_watchlist="${ANI_CLI_MAIN_WATCHLIST:-$HOME/scripts/anime-state/watchlist.json}"
+# same {"stats":..., "shows":[...]} shape as anime-sync/summary.json, so
+# summary_text.py's build() can format this one too - no second formatter.
+fallback_summary="${ANI_CLI_FALLBACK_SUMMARY:-${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/fallback_summary.json}"
 
 sanitize_name() {
     printf "%s" "$1" | sed -e 's/[\\/:*?"<>|]/ /g' -e 's/  */ /g' -e 's/^ *//;s/ *$//'
@@ -337,6 +340,11 @@ PYEOF
     mkdir -p "$(dirname "$sync_state")"
     [ -f "$sync_state" ] || printf '{}' >"$sync_state"
 
+    # per-episode outcomes, one line per event: written inside the loop below,
+    # which runs in a subshell (it's the RHS of a pipe) so shell variables
+    # can't survive past its `done` - a file can, and gets aggregated after.
+    results_tmp=$(mktemp)
+
     printf "%s\n" "$watching_tsv" | while IFS="	" read -r al_id al_title; do
         [ -z "$al_id" ] && continue
         info "Syncing: $al_title"
@@ -346,6 +354,7 @@ PYEOF
         anime_id=$(printf "%s" "$anime_list" | head -n 1 | cut -f 1)
         if [ -z "$anime_id" ]; then
             printf "\33[2K\r\033[1;31m  no allanime match for %s\033[0m\n" "$al_title" >&2
+            printf "failed\t%s\t\tno allanime match\n" "$al_title" >>"$results_tmp"
             continue
         fi
 
@@ -366,8 +375,10 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         show_dir="$anime_root/$folder"
         mkdir -p "$show_dir"
 
+        _attempted=0
         for ep_no in $ep_list; do
             awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue
+            _attempted=1
             info "  downloading episode $ep_no"
             if links=$(allanime_video "$anime_id" "$ep_no" sub | sort -g -r -s) && [ -n "$links" ]; then
                 _top=$(printf "%s" "$links" | head -n 1)
@@ -377,6 +388,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 download_dir="$show_dir"
                 if download "$video_link" "$filename"; then
                     last="$ep_no"
+                    printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                     python3 -c "
 import json, sys
 p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -386,14 +398,48 @@ json.dump(d, open(p, 'w'), indent=2)
 " "$sync_state" "$al_id" "$ep_no"
                 else
                     printf "\33[2K\r\033[1;31m  download failed for episode %s, stopping this show here\033[0m\n" "$ep_no" >&2
+                    printf "failed\t%s\t%s\tdownload failed\n" "$al_title" "$ep_no" >>"$results_tmp"
                     break
                 fi
             else
                 printf "\33[2K\r\033[1;33m  no stream for episode %s yet, stopping this show here\033[0m\n" "$ep_no" >&2
+                printf "failed\t%s\t%s\tnot released yet\n" "$al_title" "$ep_no" >>"$results_tmp"
                 break
             fi
         done
+        [ "$_attempted" = 0 ] && printf "skip\t%s\n" "$al_title" >>"$results_tmp"
     done
+
+    python3 -c "
+import json, sys
+path, out = sys.argv[1], sys.argv[2]
+shows, downloaded, failed, skipped = {}, 0, 0, 0
+with open(path) as f:
+    for line in f:
+        parts = line.rstrip('\n').split('\t')
+        status = parts[0]
+        if status == 'skip':
+            skipped += 1
+            continue
+        title = parts[1]
+        ep = parts[2] if len(parts) > 2 and parts[2] else None
+        reason = parts[3] if len(parts) > 3 else ''
+        entry = shows.setdefault(title, {'title': title, 'episodes': [], 'errors': []})
+        if status == 'ok':
+            entry['episodes'].append(int(ep))
+            downloaded += 1
+        else:
+            entry['errors'].append(reason or ep or 'failed')
+            failed += 1
+shows_list = []
+for e in shows.values():
+    e['status'] = 'downloaded' if e['episodes'] else 'failed'
+    if e['status'] == 'failed':
+        e['detail'] = e['errors'][0] if e['errors'] else 'failed'
+    shows_list.append(e)
+json.dump({'stats': {'downloaded': downloaded, 'failed': failed, 'skipped': skipped}, 'shows': shows_list}, open(out, 'w'), indent=2)
+" "$results_tmp" "$fallback_summary"
+    rm -f "$results_tmp"
 
     if [ "${ANI_CLI_SKIP_CONSOLIDATE:-0}" = 1 ]; then
         info "Sync pass done. Skipping consolidator (ANI_CLI_SKIP_CONSOLIDATE=1 - caller runs its own)."

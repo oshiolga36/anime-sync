@@ -30,12 +30,19 @@ def syncState() {
     return sh(script: 'python3 summary_text.py --state', returnStdout: true).trim()
 }
 
-// Non-empty note when the fallback-sync stage ran this build, empty otherwise.
-// summaryBody() only describes anilist_sync's own attempt (summary.json isn't
-// touched by ani-cli), so this is the only signal the fallback fired at all.
-def fallbackNote() {
-    return env.FALLBACK_FIRED == 'true' ?
-        "\n\n🔁 Fallback ran (ani-cli --sync via AllAnime, bypassing anipy-api) — check the library, it may have filled some gaps." : ''
+// Empty when the fallback-sync stage didn't run this build. Otherwise ani-cli
+// wrote fallback_summary.json in the same {"stats":..., "shows":[...]} shape
+// as anilist_sync's own summary.json, so summary_text.py's build()/state()
+// format it too — no second formatter, and this actually says what (if
+// anything) the fallback grabbed instead of just "it ran".
+def fallbackBody() {
+    if (env.FALLBACK_FIRED != 'true') return ''
+    def fbState = sh(script: 'python3 summary_text.py --file fallback_summary.json --state 2>/dev/null || true', returnStdout: true).trim()
+    if (fbState in ['new', 'mixed']) {
+        def fb = sh(script: 'python3 summary_text.py --file fallback_summary.json 2>/dev/null || true', returnStdout: true).trim()
+        return "\n\n🔁 Fallback (AllAnime via ani-cli) grabbed more:\n${fb}"
+    }
+    return "\n\n🔁 Fallback also ran (AllAnime via ani-cli) — hit the same wall, nothing extra."
 }
 
 // ['notify'|'suppress'|'recovered'|'quiet', <recovered titles>] from post/always
@@ -129,6 +136,7 @@ pipeline {
                     PATH="$HOME/.local/bin:$PATH" \
                     ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
                     ANI_CLI_MAIN_WATCHLIST="$STATE/watchlist.json" \
+                    ANI_CLI_FALLBACK_SUMMARY="$(pwd)/fallback_summary.json" \
                     ANI_CLI_SKIP_CONSOLIDATE=1 \
                     ./ani-cli --sync
                 '''
@@ -170,21 +178,21 @@ pipeline {
         unstable {
             script {
                 def (verdict, _) = alert()
-                def note = fallbackNote()
+                def fallback = fallbackBody()
                 // Same shows failing the same way as last run: stay quiet. 12 identical
                 // alerts a day is how people learn to ignore alerts. A manual run always
                 // answers, and any CHANGE in what is broken breaks through. A fired
                 // fallback is itself new information, so it always breaks through too.
-                if (verdict != 'suppress' || !scheduled() || note) {
+                if (verdict != 'suppress' || !scheduled() || fallback) {
                     def head = syncState() == 'mixed' ? "⚠️ Some episodes arrived, some shows failed"
                                                       : "⚠️ Nothing downloaded — shows are failing"
-                    notify("${head}\n\n${summaryBody()}${note}\n\nLog: ${env.BUILD_URL}console")
+                    notify("${head}\n\n${summaryBody()}${fallback}\n\nLog: ${env.BUILD_URL}console")
                 }
             }
         }
         failure {
             script {
-                notify("🔥 Sync broke — build ${env.BUILD_NUMBER}\n\n${summaryBody()}${fallbackNote()}\n\nLog: ${env.BUILD_URL}console")
+                notify("🔥 Sync broke — build ${env.BUILD_NUMBER}\n\n${summaryBody()}${fallbackBody()}\n\nLog: ${env.BUILD_URL}console")
             }
         }
         aborted {

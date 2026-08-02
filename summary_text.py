@@ -150,7 +150,13 @@ if __name__ == "__main__":
         demo()
         sys.exit(0)
 
-    f = Path(__file__).parent / "summary.json"
+    # --file lets the ani-cli fallback reuse this same formatter on its own
+    # summary (same {"stats":..., "shows":[...]} shape) without a second
+    # implementation to keep in sync.
+    if "--file" in sys.argv:
+        f = Path(sys.argv[sys.argv.index("--file") + 1])
+    else:
+        f = Path(__file__).parent / "summary.json"
     summary = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
     if "--state" in sys.argv:
