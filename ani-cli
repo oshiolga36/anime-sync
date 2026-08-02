@@ -1,0 +1,557 @@
+#!/bin/sh
+
+version_number="5.0.0"
+
+# UI
+
+# shellcheck disable=SC2086
+# $1 = prompt, $2 = multi select flag (for fzf/rofi), $3 = extra flags by user
+menu() {
+    case "$menu_program" in
+        fzf) fzf --reverse --cycle --prompt "$1" $2 $3 ;;
+        rofi) rofi -sort -dmenu -i -p "$1" $2 $3 ;;
+        dmenu) dmenu -l 20 -p "$1" $3 ;;
+        *) "$menu_program" $3 "$1" ;;
+    esac
+}
+
+# provide menu. input format is either (ep_list) or (number \t anime_id \t anime_name)
+nth() {
+    _stdin=$(cat -)
+    [ -z "$_stdin" ] && return 1
+    _line_count="$(printf "%s\n" "$_stdin" | wc -l | tr -d "[:space:]")"
+    [ "$_line_count" -eq 1 ] && printf "%s" "$_stdin" | cut -f 2,3 && return 0
+    _prompt="$1"
+    [ $# -ne 1 ] && _multi_flag="$2"
+    _line=$(printf "%s" "$_stdin" | cut -f 1,3 | tr '\t' ' ' | menu "$_prompt" "$_multi_flag" "$menu_extra_flags" | cut -d " " -f 1)
+    _line_start=$(printf "%s" "$_line" | head -n 1)
+    _line_end=$(printf "%s" "$_line" | tail -n 1)
+    [ -n "$_line" ] || return 1
+    if [ "$_line_start" = "$_line_end" ]; then
+        printf "%s" "$_stdin" | grep -E '^'"${_line}"'($|[[:space:]])' | cut -f 2,3 || return 1
+    else
+        printf "%s" "$_stdin" | sed -n '/^'"${_line_start}"'$/,/^'"${_line_end}$"'/p' || return 1
+    fi
+}
+
+die() {
+    printf "\33[2K\r\033[1;31m%s\033[0m\n" "$*" >&2
+    exit 1
+}
+
+info() {
+    printf "\33[2K\r\033[1;34m%s\033[0m\n" "$*"
+}
+
+help_info() {
+    printf "
+    Usage:
+    %s [options] [query]
+    %s [query] [options]
+    %s [options] [query] [options]
+
+    Options:
+      -c, --continue
+        Continue watching from history
+      -d, --download
+        Download the video instead of playing it
+      -D, --delete
+        Delete history
+      -S, --select-nth
+        Select nth entry
+      -q, --quality
+        Specify the video quality
+      -v, --vlc
+        Use VLC to play the video
+      -V, --version
+        Show the version of the script
+      -h, --help
+        Show this help message and exit
+      -e, --episode, -r, --range
+        Specify the number of episodes to watch
+      --dub
+        Play dubbed version
+      --rofi
+        Use rofi instead of fzf for the interactive menu
+      --dmenu
+        Use dmenu instead of fzf for the interactive menu
+      --no-detach
+        Don't detach the player (useful for in-terminal playback, mpv only)
+      --exit-after-play
+        Exit the player, and return the player exit code (useful for non interactive scenarios)
+      --sync
+        Backup mode: pull AniList WATCHING list, download new episodes via
+        AllAnime directly (bypassing anipy-cli/Jenkins) into ANIME_ROOT, then
+        run the jellyfin consolidator. Use when the Jenkins anime-sync job or
+        the anipy-cli install is broken but the AllAnime site itself is up.
+    \n" "${0##*/}" "${0##*/}" "${0##*/}"
+    exit 0
+}
+
+version_info() {
+    printf "%s\n" "$version_number"
+    exit 0
+}
+
+# Bookkeeping
+
+# checks if dependencies are present
+dep_ch() {
+    command -v "$1" >/dev/null || die "Program $1 not found. Please install it."
+}
+
+# checks for deps in order and returns the first available. format is "prog_a,prog_b,prog_c"
+dep_ch_failover() {
+    [ -z "$1" ] && return 1
+    prog=$(printf "%s" "$1" | cut -d "," -f 1)
+    rest=$(printf "%s" "$1" | cut -s -d "," -f 2-)
+    command -v "$prog" >/dev/null 2>&1 && printf "%s" "$prog" && return 0
+    [ -e "$prog" ] && printf "%s" "$prog" && return 0
+    dep_ch_failover "$rest"
+}
+
+cleanup() {
+    tput sgr0               # clears colors
+    rm -f "${histfile}.new" # remove temp logfile
+}
+
+# SCRAPING
+#
+# AllAnime backend - same site + same GraphQL/AES-signed API that
+# /home/tolga/scripts/anime-sync/anilist_sync.py uses via anipy_api. Search
+# and episode-list are plain persisted-query POSTs, but get_video needs a
+# per-request AES-GCM signed token derived from a keygen fetched at runtime
+# (see anipy_api's allanime_provider.py). That crypto already exists,
+# correct and tested, in anipy_api - shelling out to it beats re-deriving
+# AES-GCM in POSIX sh. allanime_helper wraps it as a 3-verb CLI.
+allanime_helper="${ANI_CLI_ALLANIME_HELPER:-$HOME/scripts/ani-cli-allanime.py}"
+
+# search the query and give results. format is (id \t name)
+allanime_search() {
+    python3 "$allanime_helper" search "$1"
+}
+
+# get the episode list of the selected anime. one episode number per line.
+allanime_episodes() {
+    python3 "$allanime_helper" episodes "$1" "$2"
+}
+
+# get "<resolution>p >url" lines for one episode
+allanime_video() {
+    python3 "$allanime_helper" video "$1" "$2" "$3"
+}
+
+# select the quality according to the setting
+select_quality() {
+    case "$1" in
+        best) _result=$(printf "%s" "$links" | head -n 1) ;;
+        worst) _result=$(printf "%s" "$links" | grep -E '^[0-9]{3,4}' | tail -n 1) ;;
+        *) _result=$(printf "%s" "$links" | grep -m 1 "$1") ;;
+    esac
+    [ -z "$_result" ] && printf "\33[2K\r\033[1;33m%s\033[0m\n" "$1 not found, defaulting to best" >&2 && _result=$(printf "%s" "$links" | head -n 1)
+
+    video_link=$(printf "%s" "$_result" | cut -d ">" -f 2)
+    video_referrer=$(printf "%s" "$_result" | cut -s -d ">" -f 3)
+}
+
+# collects direct links for the current episode and selects one with desired quality
+get_video_link() {
+    links=$(allanime_video "$anime_id" "$ep_no" "$mode" | sort -g -r -s)
+    [ -z "$links" ] && die "No sources found for $mode!"
+    info "allanime links fetched"
+    select_quality "$quality"
+    if printf "%s" "$ep_list" | grep -q "^$ep_no$"; then
+        [ -z "$video_link" ] && die "Episode is released, but no valid sources!"
+    else
+        [ -z "$video_link" ] && die "Episode not released!"
+    fi
+}
+
+# HISTORY
+
+update_history() {
+    if grep -q "	${anime_id}	" "$histfile"; then
+        safe_title=$(printf "%s" "$anime_title" | sed 's|[&\|]|\\&|g')
+        sed -E "s|^[^	]+	${anime_id}	[^	]+$|${ep_no}	${anime_id}	${safe_title}|" "$histfile" >"${histfile}.new"
+    else
+        cp "$histfile" "${histfile}.new"
+        printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" >>"${histfile}.new"
+    fi
+    mv "${histfile}.new" "$histfile"
+}
+
+# PLAYING
+
+# shellcheck disable=SC2086
+# $1 = video link, $2 = video name, $3 = extra flags. uses $video_referrer if set.
+download() {
+    _ref_ytdlp=""
+    _ref_ffmpeg=""
+    [ -n "$video_referrer" ] && _ref_ytdlp="--referer" && _ref_ffmpeg="-headers"
+    command -v "yt-dlp" >/dev/null && yt-dlp "$1" ${_ref_ytdlp:+$_ref_ytdlp "$video_referrer"} --no-skip-unavailable-fragments --fragment-retries infinite -N 16 -o "$download_dir/$2.mp4" $3 && return 0
+    ffmpeg -loglevel error -stats ${_ref_ffmpeg:+$_ref_ffmpeg "Referer: $video_referrer"} -i "$1" -c copy "$download_dir/$2.mp4" $3
+}
+
+play_episode() {
+    [ "$log_episode" = 1 ] && [ "$player_function" != "download" ] && command -v logger >/dev/null && logger -t ani-cli "${anime_title} ${ep_no}"
+    [ -z "$video_link" ] && get_video_link
+    wait
+    # shellcheck disable=SC2086
+    case "$player_function" in
+        *mpv*)
+            if [ "$no_detach" = 0 ]; then
+                nohup $player_function $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 &
+            else
+                $player_function $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link"
+                mpv_exitcode=$?
+                [ "$exit_after_play" = 1 ] && [ -z "$_range" ] && exit "$mpv_exitcode"
+            fi
+            ;;
+        *vlc*) nohup $player_function $player_extra_flags --play-and-exit --meta-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 & ;;
+        download) "$player_function" "$video_link" "${anime_title} Episode ${ep_no}" $player_extra_flags ;;
+        *) nohup $player_function $player_extra_flags "$video_link" >/dev/null 2>&1 & ;;
+    esac
+    replay="$video_link"
+    unset video_link
+    update_history
+    [ "$menu_program" != "fzf" ] && wait
+}
+
+play() {
+    _start=$(printf "%s" "$ep_no" | grep -Eo '^(-1|[0-9]+(\.[0-9]+)?)')
+    _end=$(printf "%s" "$ep_no" | grep -Eo '(-1|[0-9]+(\.[0-9]+)?)$')
+    [ "$_start" = "-1" ] && ep_no=$(printf "%s" "$ep_list" | tail -n 1) && unset _start
+    [ -z "$_end" ] || [ "$_end" = "$_start" ] && unset _start _end
+    [ "$_end" = "-1" ] && _end=$(printf "%s" "$ep_list" | tail -n 1)
+    _line_count=$(printf "%s\n" "$ep_no" | wc -l | tr -d "[:space:]")
+    if [ "$_line_count" != 1 ] || [ -n "$_start" ]; then
+        [ -z "$_start" ] && _start=$(printf "%s\n" "$ep_no" | head -n 1)
+        [ -z "$_end" ] && _end=$(printf "%s\n" "$ep_no" | tail -n 1)
+        _range=$(printf "%s\n" "$ep_list" | sed -nE "/^${_start}\$/,/^${_end}\$/p")
+        [ -z "$_range" ] && die "Invalid range!"
+        for i in $_range; do
+            tput clear
+            ep_no=$i
+            info "Playing episode $ep_no..."
+            [ "$i" = "$_end" ] && unset _range
+            play_episode
+        done
+    else
+        printf "%s" "$ep_list" | grep -q "^$ep_no$" || die "Invalid episode!"
+        play_episode
+    fi
+    [ "$player_function" != "download" ] && tput rc && tput ed
+}
+
+# BACKUP SYNC MODE
+#
+# Mirrors what /home/tolga/scripts/anime-sync/anilist_sync.py does (pull the
+# AniList WATCHING list, download missing episodes, hand off to the jellyfin
+# consolidator) - same AllAnime backend, same account, but standalone: no
+# anipy-cli config/state machinery, no Jenkins container. Useful when the
+# Jenkins job or the anipy-api pip install is broken but AllAnime itself is
+# reachable; if AllAnime itself is down (NEED_CAPTCHA, keygen stale) this
+# will fail the same way the main pipeline does, since it's the same site.
+#
+# ponytail: no fuzzy title matching, no format-shifting to remux_to/ffmpeg_hls
+# from config.yaml - takes the first AllAnime search hit (ranked by the
+# provider's own Levenshtein sort) and always writes .mp4. Good enough for a
+# backup path; if it starts mismatching shows, add real title-similarity
+# matching then.
+
+anilist_config="${ANIPY_CONFIG:-$HOME/.config/anipy-cli/config.yaml}"
+anime_root="${ANIME_ROOT:-/data/media/Plex/Anime}"
+consolidator="${ANI_CLI_CONSOLIDATOR:-$HOME/scripts/anime-sync/jellyfin_consolidator.py}"
+sync_state="${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/sync_watermark.json"
+# anipy-api's own per-show progress, keyed by AniList id same as sync_state.
+# Read-only floor so this never redownloads what the Jenkins pipeline already
+# has - never written to, so it can't corrupt the main pipeline's state.
+main_watchlist="${ANI_CLI_MAIN_WATCHLIST:-$HOME/scripts/anime-state/watchlist.json}"
+
+sanitize_name() {
+    printf "%s" "$1" | sed -e 's/[\\/:*?"<>|]/ /g' -e 's/  */ /g' -e 's/^ *//;s/ *$//'
+}
+
+# resolve an AniList title (english or romaji) to the folder it already lives
+# in under $anime_root, via aliases.yaml. falls back to the sanitized title.
+resolve_folder() {
+    _title="$1"
+    _alias_file="$anime_root/aliases.yaml"
+    if [ -f "$_alias_file" ]; then
+        _mapped=$(sed -nE "s|^\"?${_title}\"?:[[:space:]]*\"?([^\"]+)\"?[[:space:]]*\$|\1|p" "$_alias_file" | head -n 1)
+        [ -n "$_mapped" ] && printf "%s" "$_mapped" && return 0
+    fi
+    sanitize_name "$_title"
+}
+
+sync_mode() {
+    dep_ch python3
+    dep_ch_failover "yt-dlp,ffmpeg" >/dev/null || die "Neither yt-dlp nor ffmpeg found"
+    [ -f "$anilist_config" ] || die "AniList config not found: $anilist_config"
+
+    token=$(sed -nE 's/^anilist_token:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' "$anilist_config" | head -n 1)
+    [ -z "$token" ] && die "anilist_token not set in $anilist_config"
+
+    info "Fetching AniList WATCHING list..."
+    watching_tsv=$(python3 - "$token" <<'PYEOF'
+import json, sys, urllib.request
+
+token = sys.argv[1]
+# AniList's WAF 403s the default urllib User-Agent, and userId:null needs a
+# real id to mean "me" - so resolve the viewer first.
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ani-cli-sync",
+}
+req = urllib.request.Request(
+    "https://graphql.anilist.co",
+    data=json.dumps({"query": "query { Viewer { id } }"}).encode(),
+    headers=headers,
+)
+viewer_id = json.load(urllib.request.urlopen(req, timeout=15))["data"]["Viewer"]["id"]
+
+query = """
+query ($userId: Int) {
+  MediaListCollection(userId: $userId, type: ANIME, status: CURRENT) { lists { entries {
+    media { id title { romaji english } }
+  } } }
+}
+"""
+req = urllib.request.Request(
+    "https://graphql.anilist.co",
+    data=json.dumps({"query": query, "variables": {"userId": viewer_id}}).encode(),
+    headers=headers,
+)
+data = json.load(urllib.request.urlopen(req, timeout=15))
+for lst in data["data"]["MediaListCollection"]["lists"]:
+    for e in lst["entries"]:
+        m = e["media"]
+        title = m["title"]["english"] or m["title"]["romaji"]
+        print(f"{m['id']}\t{title}")
+PYEOF
+    ) || die "AniList query failed"
+    [ -z "$watching_tsv" ] && die "No shows in WATCHING list (or query returned nothing)"
+
+    mkdir -p "$(dirname "$sync_state")"
+    [ -f "$sync_state" ] || printf '{}' >"$sync_state"
+
+    printf "%s\n" "$watching_tsv" | while IFS="	" read -r al_id al_title; do
+        [ -z "$al_id" ] && continue
+        info "Syncing: $al_title"
+
+        folder=$(resolve_folder "$al_title")
+        anime_list=$(allanime_search "$al_title")
+        anime_id=$(printf "%s" "$anime_list" | head -n 1 | cut -f 1)
+        if [ -z "$anime_id" ]; then
+            printf "\33[2K\r\033[1;31m  no allanime match for %s\033[0m\n" "$al_title" >&2
+            continue
+        fi
+
+        ep_list="$(allanime_episodes "$anime_id" sub | sort -n)"
+        last=$(python3 -c "
+import json, sys
+def last_dl(path, key):
+    try:
+        d = json.load(open(path))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return -1
+    v = d.get(key, -1)
+    return v.get('last_downloaded', -1) if isinstance(v, dict) else v
+path, main_path, key = sys.argv[1], sys.argv[2], sys.argv[3]
+print(max(last_dl(path, key), last_dl(main_path, key)))
+" "$sync_state" "$main_watchlist" "$al_id")
+
+        show_dir="$anime_root/$folder"
+        mkdir -p "$show_dir"
+
+        for ep_no in $ep_list; do
+            awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue
+            info "  downloading episode $ep_no"
+            if links=$(allanime_video "$anime_id" "$ep_no" sub | sort -g -r -s) && [ -n "$links" ]; then
+                _top=$(printf "%s" "$links" | head -n 1)
+                video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
+                video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
+                filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
+                download_dir="$show_dir"
+                if download "$video_link" "$filename"; then
+                    last="$ep_no"
+                    python3 -c "
+import json, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+d[k] = v
+json.dump(d, open(p, 'w'), indent=2)
+" "$sync_state" "$al_id" "$ep_no"
+                else
+                    printf "\33[2K\r\033[1;31m  download failed for episode %s, stopping this show here\033[0m\n" "$ep_no" >&2
+                    break
+                fi
+            else
+                printf "\33[2K\r\033[1;33m  no stream for episode %s yet, stopping this show here\033[0m\n" "$ep_no" >&2
+                break
+            fi
+        done
+    done
+
+    if [ "${ANI_CLI_SKIP_CONSOLIDATE:-0}" = 1 ]; then
+        info "Sync pass done. Skipping consolidator (ANI_CLI_SKIP_CONSOLIDATE=1 - caller runs its own)."
+    else
+        info "Sync pass done. Running jellyfin consolidator..."
+        if [ -f "$consolidator" ]; then
+            ANIME_ROOT="$anime_root" python3 "$consolidator"
+        else
+            printf "\33[2K\r\033[1;33m  consolidator not found at %s, skipping\033[0m\n" "$consolidator" >&2
+        fi
+    fi
+    exit 0
+}
+
+# MAIN
+
+# setup
+mode="${ANI_CLI_MODE:-sub}"
+download_dir="${ANI_CLI_DOWNLOAD_DIR:-.}"
+log_episode="${ANI_CLI_LOG:-1}"
+quality="${ANI_CLI_QUALITY:-best}"
+
+case "$(uname -a | cut -d " " -f 1,3-)" in
+    *Darwin*) player_function="${ANI_CLI_PLAYER:-$(dep_ch_failover "iina,/Applications/IINA.app/Contents/MacOS/iina-cli,mpv,vlc")}" || die 'No player found. Looked for iina, mpv and vlc' ;;
+    *) player_function="${ANI_CLI_PLAYER:-$(dep_ch_failover "mpv,$HOME/.local/share/flatpak/app/io.mpv/Mpv/,vlc")}" || die 'No player found. Looked for mpv and vlc' ;;
+esac
+
+player_extra_flags="${ANI_CLI_PLAYER_FLAGS:-""}"
+no_detach="${ANI_CLI_NO_DETACH:-0}"
+exit_after_play="${ANI_CLI_EXIT_AFTER_PLAY:-0}"
+menu_program="${ANI_CLI_MENU:-fzf}"
+menu_extra_flags="${ANI_CLI_MENU_FLAGS:-""}"
+
+[ ! -t 0 ] && { command -v dmenu >/dev/null && menu_program=dmenu; command -v rofi >/dev/null && menu_program=rofi; }
+
+hist_dir="${ANI_CLI_HIST_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}"
+[ ! -d "$hist_dir" ] && mkdir -p "$hist_dir"
+histfile="$hist_dir/ani-hsts"
+[ ! -f "$histfile" ] && : >"$histfile"
+
+source="${ANI_CLI_DEFAULT_SOURCE:-search}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -v | --vlc) player_function="vlc" ;;
+        -q | --quality)
+            [ $# -lt 2 ] && die "missing argument!"
+            quality="$2"
+            shift
+            ;;
+        -S | --select-nth)
+            [ $# -lt 2 ] && die "missing argument!"
+            index="$2"
+            shift
+            ;;
+        -c | --continue) source=history ;;
+        -d | --download) player_function=download ;;
+        -D | --delete)
+            : >"$histfile"
+            exit 0
+            ;;
+        -V | --version) version_info ;;
+        -h | --help) help_info ;;
+        -e | --episode | -r | --range)
+            [ $# -lt 2 ] && die "missing argument!"
+            ep_no="$2"
+            shift
+            ;;
+        --dub) mode="dub" ;;
+        --no-detach) no_detach=1 ;;
+        --exit-after-play) exit_after_play=1 && no_detach=1 ;;
+        --rofi) menu_program=rofi ;;
+        --dmenu) menu_program=dmenu ;;
+        --sync) source=sync ;;
+        *) query="$(printf "%s" "$query $1" | sed 's|^ ||')" ;;
+    esac
+    shift
+done
+
+[ "$menu_program" = "fzf" ] && menu_multi_flag="-m"
+[ "$menu_program" = "rofi" ] && menu_multi_flag="-multi-select"
+
+info "Checking dependencies..."
+dep_ch "sed"
+dep_ch "grep"
+[ "$source" != "sync" ] && dep_ch "$menu_program"
+
+case "$player_function" in
+    download) dep_ch_failover "yt-dlp,ffmpeg" >/dev/null || die 'Neither yt-dlp nor ffmpeg found' ;;
+    *) [ "$source" != "sync" ] && dep_ch "$player_function" ;;
+esac
+
+trap 'cleanup; exit 1' INT HUP TERM
+
+# searching
+case "$source" in
+    sync) sync_mode ;;
+    history)
+        anime_list=$(while read -r ep_no anime_id anime_title; do
+            ep_list=$(allanime_episodes "$anime_id" "$mode")
+            next=$(printf "%s" "$ep_list" | sed -n "/^${ep_no}$/{n;p;}") 2>/dev/null
+            [ -n "$next" ] && printf "%s\t%s - episode %s\n" "$anime_id" "$anime_title" "$next"
+        done <"$histfile")
+        [ -z "$anime_list" ] && die "No unwatched series in history!"
+        anime_id=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: " | cut -f 1)
+        [ -z "$anime_id" ] && exit 1
+        anime_title=$(printf "%s" "$anime_list" | grep "^$anime_id	" | cut -f 2 | sed 's| - episode.*||')
+        ep_list="$(allanime_episodes "$anime_id" "$mode")"
+        ep_no=$(printf "%s" "$anime_list" | grep "^$anime_id	" | sed -nE 's/.*- episode (.+)$/\1/p')
+        ;;
+    *)
+        while [ -z "$query" ]; do
+            printf "\33[2K\r\033[1;36mSearch anime: \033[0m" && read -r query
+        done
+        anime_list=$(allanime_search "$query")
+        [ -z "$anime_list" ] && die "No results found!"
+        [ "$index" -eq "$index" ] 2>/dev/null && result=$(printf "%s" "$anime_list" | sed -n "${index}p")
+        [ -z "$index" ] && result=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: ")
+        [ -z "$result" ] && die "Invalid anime selection"
+        anime_title="$(printf "%s" "$result" | cut -f 2)"
+        anime_id="$(printf "%s" "$result" | cut -f 1)"
+        ep_list="$(allanime_episodes "$anime_id" "$mode")"
+        [ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$menu_multi_flag")
+        [ -z "$ep_no" ] && die "Invalid episode selection"
+        ;;
+esac
+
+tput cuu1 && tput el
+tput sc
+
+play
+[ "$player_function" = "download" ] && exit 0
+
+while cmd=$(printf "next\nreplay\nprevious\nselect\nchange_quality\nquit" | nth "Playing episode $ep_no of $anime_title... "); do
+    case "$cmd" in
+        next) ep_no=$(printf "%s" "$ep_list" | sed -n "/^${ep_no}$/{n;p;}") 2>/dev/null ;;
+        replay) video_link="$replay" ;;
+        previous) ep_no=$(printf "%s" "$ep_list" | sed -n "/^${ep_no}$/{g;1!p;};h") 2>/dev/null ;;
+        select) ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$menu_multi_flag") ;;
+        change_quality)
+            new_quality="$(printf "%s" "$links" | menu "Select Quality: " "" "$menu_extra_flags" | cut -d ">" -f 1)"
+            [ -z "$new_quality" ] && die "No quality selected"
+            select_quality "$new_quality"
+            ;;
+        *)
+            cleanup
+            exit 0
+            ;;
+    esac
+    [ -z "$ep_no" ] && die "Out of range"
+    play
+done
+
+# ani-cli (backup-sync fork)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Upstream: https://github.com/pystardust/ani-cli
