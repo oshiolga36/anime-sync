@@ -403,7 +403,9 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
             awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue
             _attempted=1
             info "  downloading episode $ep_no"
-            if links=$(allanime_video "$anime_id" "$ep_no" sub | sort -g -r -s) && [ -n "$links" ]; then
+            _err_file=$(mktemp)
+            links=$(allanime_video "$anime_id" "$ep_no" sub 2>"$_err_file" | sort -g -r -s)
+            if [ -n "$links" ]; then
                 _top=$(printf "%s" "$links" | head -n 1)
                 video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
                 video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
@@ -441,10 +443,18 @@ if k in d and v > d[k].get('last_downloaded', -1):
                     break
                 fi
             else
-                printf "\33[2K\r\033[1;33m  no stream for episode %s yet, stopping this show here\033[0m\n" "$ep_no" >&2
-                printf "failed\t%s\t%s\tnot released yet\n" "$al_title" "$ep_no" >>"$results_tmp"
+                # Distinguish a real error (rate-limited, captcha-gated, API
+                # broken) from a genuinely empty response (episode really
+                # isn't out yet) - both look identical as "no links", but
+                # reporting the real cause is the whole point of this fix.
+                _reason=$(sed -n 's/^error: //p' "$_err_file" | tail -1)
+                [ -z "$_reason" ] && _reason="not released yet"
+                printf "\33[2K\r\033[1;33m  %s for episode %s, stopping this show here\033[0m\n" "$_reason" "$ep_no" >&2
+                printf "failed\t%s\t%s\t%s\n" "$al_title" "$ep_no" "$_reason" >>"$results_tmp"
+                rm -f "$_err_file"
                 break
             fi
+            rm -f "$_err_file"
         done
         [ "$_attempted" = 0 ] && printf "skip\t%s\n" "$al_title" >>"$results_tmp"
     done
