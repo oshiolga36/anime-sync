@@ -264,8 +264,13 @@ anime_root="${ANIME_ROOT:-/data/media/Plex/Anime}"
 consolidator="${ANI_CLI_CONSOLIDATOR:-$HOME/scripts/anime-sync/jellyfin_consolidator.py}"
 sync_state="${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/sync_watermark.json"
 # anipy-api's own per-show progress, keyed by AniList id same as sync_state.
-# Read-only floor so this never redownloads what the Jenkins pipeline already
-# has - never written to, so it can't corrupt the main pipeline's state.
+# Read as a floor so this never redownloads what the Jenkins pipeline already
+# has. Also used as the identifier source (see trusted_id below): when a show
+# is already mapped here, its last_downloaded gets bumped after a successful
+# download too, so the main pipeline doesn't think it's still missing that
+# episode and keep retrying it. Never CREATES entries or touches ones this
+# run didn't use a trusted identifier for - can't poison an unmapped show
+# with a guessed identifier.
 main_watchlist="${ANI_CLI_MAIN_WATCHLIST:-$HOME/scripts/anime-state/watchlist.json}"
 # same {"stats":..., "shows":[...]} shape as anime-sync/summary.json, so
 # summary_text.py's build() can format this one too - no second formatter.
@@ -350,8 +355,26 @@ PYEOF
         info "Syncing: $al_title"
 
         folder=$(resolve_folder "$al_title")
-        anime_list=$(allanime_search "$al_title")
-        anime_id=$(printf "%s" "$anime_list" | head -n 1 | cut -f 1)
+
+        # Prefer the identifier anipy-api already validated for this show over
+        # a fresh fuzzy search - faster, and safe to write the watermark back
+        # to (see below), since it's not a guess. Falls back to search only
+        # for shows the main pipeline hasn't mapped yet.
+        anime_id=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+e = d.get(sys.argv[2])
+print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identifier') else '')
+" "$main_watchlist" "$al_id")
+        trusted_id=1
+        if [ -z "$anime_id" ]; then
+            trusted_id=0
+            anime_list=$(allanime_search "$al_title")
+            anime_id=$(printf "%s" "$anime_list" | head -n 1 | cut -f 1)
+        fi
         if [ -z "$anime_id" ]; then
             printf "\33[2K\r\033[1;31m  no allanime match for %s\033[0m\n" "$al_title" >&2
             printf "failed\t%s\t\tno allanime match\n" "$al_title" >>"$results_tmp"
@@ -396,6 +419,22 @@ d = json.load(open(p))
 d[k] = v
 json.dump(d, open(p, 'w'), indent=2)
 " "$sync_state" "$al_id" "$ep_no"
+                    # Only safe to advance the shared watchlist when anime_id
+                    # came from it in the first place (trusted_id=1) - a
+                    # blind-searched identifier might be the wrong show, and
+                    # writing that back would poison anilist_sync.py's state.
+                    if [ "$trusted_id" = 1 ]; then
+                        python3 -c "
+import json, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+if k in d and v > d[k].get('last_downloaded', -1):
+    d[k]['last_downloaded'] = v
+    tmp = p + '.tmp'
+    json.dump(d, open(tmp, 'w'), indent=2)
+    import os; os.replace(tmp, p)
+" "$main_watchlist" "$al_id" "$ep_no"
+                    fi
                 else
                     printf "\33[2K\r\033[1;31m  download failed for episode %s, stopping this show here\033[0m\n" "$ep_no" >&2
                     printf "failed\t%s\t%s\tdownload failed\n" "$al_title" "$ep_no" >>"$results_tmp"
