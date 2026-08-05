@@ -84,8 +84,10 @@ pipeline {
                 // rich/pyyaml are imported directly by the scripts and are NOT
                 // guaranteed transitive deps of anipy — pin them here explicitly.
                 // yt-dlp is for ani-cli's fallback-sync stage below (ffmpeg alone
-                // can't handle every embed host's auth/HLS quirks).
-                sh 'pip install --user --break-system-packages --upgrade anipy-api anipy-cli rich pyyaml yt-dlp'
+                // can't handle every embed host's auth/HLS quirks). curl_cffi is
+                // for ani-cli-anidb.py's second-chance provider - anidb.app sits
+                // behind Cloudflare and plain requests/curl gets the JS challenge.
+                sh 'pip install --user --break-system-packages --upgrade anipy-api anipy-cli rich pyyaml yt-dlp curl_cffi'
             }
         }
 

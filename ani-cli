@@ -141,6 +141,24 @@ allanime_video() {
     python3 "$allanime_helper" video "$1" "$2" "$3"
 }
 
+# anidb.app - second-chance provider, tried only when AllAnime itself is down
+# (NEED_CAPTCHA / AA_CRYPTO_STALE). Different site, different id space -
+# always blind-searched by title, never trusted the way a watchlist-sourced
+# allanime id is (see trusted_id below), so it never writes to main_watchlist.
+anidb_helper="${ANI_CLI_ANIDB_HELPER:-$HOME/scripts/ani-cli-anidb.py}"
+
+anidb_search() {
+    python3 "$anidb_helper" search "$1"
+}
+
+anidb_episodes() {
+    python3 "$anidb_helper" episodes "$1" "$2"
+}
+
+anidb_video() {
+    python3 "$anidb_helper" video "$1" "$2" "$3"
+}
+
 # select the quality according to the setting
 select_quality() {
     case "$1" in
@@ -448,10 +466,50 @@ if k in d and v > d[k].get('last_downloaded', -1):
                 # isn't out yet) - both look identical as "no links", but
                 # reporting the real cause is the whole point of this fix.
                 _reason=$(sed -n 's/^error: //p' "$_err_file" | tail -1)
+                rm -f "$_err_file"
                 [ -z "$_reason" ] && _reason="not released yet"
+
+                # AllAnime itself down (captcha/crypto), not just this episode
+                # unreleased - try anidb before giving up on this show. Blind
+                # title search every time (ponytail: no id cache like allanime's
+                # trusted_id - anidb ids live in a separate namespace, and a
+                # wrong-show match here never reaches main_watchlist anyway).
+                anidb_links=""
+                case "$_reason" in
+                    # anipy_api wraps both NEED_CAPTCHA and AA_CRYPTO_STALE as
+                    # "Server responded with unknown error: <code>" - a real
+                    # site-side outage, unlike "not released yet".
+                    *"unknown error"*)
+                        anidb_id=$(anidb_search "$al_title" 2>/dev/null | head -n 1 | cut -f 1)
+                        if [ -n "$anidb_id" ] && anidb_episodes "$anidb_id" sub 2>/dev/null | grep -qx "$ep_no"; then
+                            anidb_links=$(anidb_video "$anidb_id" "$ep_no" sub 2>/dev/null | sort -g -r -s)
+                        fi
+                        ;;
+                esac
+
+                if [ -n "$anidb_links" ]; then
+                    info "  AllAnime down ($_reason), got episode $ep_no from anidb.app instead"
+                    _top=$(printf "%s" "$anidb_links" | head -n 1)
+                    video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
+                    video_referrer=""
+                    filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
+                    download_dir="$show_dir"
+                    if download "$video_link" "$filename"; then
+                        last="$ep_no"
+                        printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
+                        python3 -c "
+import json, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+d[k] = v
+json.dump(d, open(p, 'w'), indent=2)
+" "$sync_state" "$al_id" "$ep_no"
+                        continue
+                    fi
+                fi
+
                 printf "\33[2K\r\033[1;33m  %s for episode %s, stopping this show here\033[0m\n" "$_reason" "$ep_no" >&2
                 printf "failed\t%s\t%s\t%s\n" "$al_title" "$ep_no" "$_reason" >>"$results_tmp"
-                rm -f "$_err_file"
                 break
             fi
             rm -f "$_err_file"
