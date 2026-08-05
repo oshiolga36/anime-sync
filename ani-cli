@@ -294,6 +294,38 @@ main_watchlist="${ANI_CLI_MAIN_WATCHLIST:-$HOME/scripts/anime-state/watchlist.js
 # summary_text.py's build() can format this one too - no second formatter.
 fallback_summary="${ANI_CLI_FALLBACK_SUMMARY:-${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/fallback_summary.json}"
 
+# The two state writes below were inlined verbatim at 5 call sites between
+# the allanime and anidb download paths. Keeping one copy each: a state-write
+# bug otherwise has to be fixed in every copy, which is exactly how the
+# "bump only fired on a fresh download" miss survived several rounds of fixes.
+
+# $1 al_id  $2 episode - ani-cli's own watermark, flat {id: ep}
+set_watermark() {
+    python3 -c "
+import json, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+d[k] = v
+json.dump(d, open(p, 'w'), indent=2)
+" "$sync_state" "$1" "$2"
+}
+
+# $1 al_id  $2 episode - anipy-api's shared watchlist. Upward-only, never
+# creates entries: a guessed identifier must not be able to poison a show
+# the main pipeline hasn't mapped. Atomic so a crash can't truncate it.
+bump_main_watchlist() {
+    python3 -c "
+import json, os, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+if k in d and v > d[k].get('last_downloaded', -1):
+    d[k]['last_downloaded'] = v
+    tmp = p + '.tmp'
+    json.dump(d, open(tmp, 'w'), indent=2)
+    os.replace(tmp, p)
+" "$main_watchlist" "$1" "$2"
+}
+
 sanitize_name() {
     printf "%s" "$1" | sed -e 's/[\\/:*?"<>|]/ /g' -e 's/  */ /g' -e 's/^ *//;s/ *$//'
 }
@@ -422,18 +454,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         # retrying the same already-downloaded episode against AllAnime
         # forever. Same trusted_id gate as every other main_watchlist write -
         # only for shows whose allanime identifier is already validated.
-        if [ "$trusted_id" = 1 ]; then
-            python3 -c "
-import json, sys
-p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
-if k in d and v > d[k].get('last_downloaded', -1):
-    d[k]['last_downloaded'] = v
-    tmp = p + '.tmp'
-    json.dump(d, open(tmp, 'w'), indent=2)
-    import os; os.replace(tmp, p)
-" "$main_watchlist" "$al_id" "$last"
-        fi
+        [ "$trusted_id" = 1 ] && bump_main_watchlist "$al_id" "$last"
 
         show_dir="$anime_root/$folder"
         mkdir -p "$show_dir"
@@ -454,29 +475,12 @@ if k in d and v > d[k].get('last_downloaded', -1):
                 if download "$video_link" "$filename"; then
                     last="$ep_no"
                     printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
-                    python3 -c "
-import json, sys
-p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
-d[k] = v
-json.dump(d, open(p, 'w'), indent=2)
-" "$sync_state" "$al_id" "$ep_no"
+                    set_watermark "$al_id" "$ep_no"
                     # Only safe to advance the shared watchlist when anime_id
                     # came from it in the first place (trusted_id=1) - a
                     # blind-searched identifier might be the wrong show, and
                     # writing that back would poison anilist_sync.py's state.
-                    if [ "$trusted_id" = 1 ]; then
-                        python3 -c "
-import json, sys
-p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
-if k in d and v > d[k].get('last_downloaded', -1):
-    d[k]['last_downloaded'] = v
-    tmp = p + '.tmp'
-    json.dump(d, open(tmp, 'w'), indent=2)
-    import os; os.replace(tmp, p)
-" "$main_watchlist" "$al_id" "$ep_no"
-                    fi
+                    [ "$trusted_id" = 1 ] && bump_main_watchlist "$al_id" "$ep_no"
                 else
                     printf "\33[2K\r\033[1;31m  download failed for episode %s, stopping this show here\033[0m\n" "$ep_no" >&2
                     printf "failed\t%s\t%s\tdownload failed\n" "$al_title" "$ep_no" >>"$results_tmp"
@@ -544,13 +548,7 @@ if k in d and v > d[k].get('last_downloaded', -1):
                     if download "$video_link" "$filename"; then
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
-                        python3 -c "
-import json, sys
-p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
-d[k] = v
-json.dump(d, open(p, 'w'), indent=2)
-" "$sync_state" "$al_id" "$ep_no"
+                        set_watermark "$al_id" "$ep_no"
                         # Same bump anilist_sync.py itself relies on for the
                         # allanime path (see trusted_id above) - skip it here
                         # and anilist_sync.py has no idea this episode already
@@ -559,18 +557,7 @@ json.dump(d, open(p, 'w'), indent=2)
                         # anidb_exact, not just "found a result", for the same
                         # reason as trusted_id: only an exact title match is
                         # confident enough to be the right show.
-                        if [ "$anidb_exact" = 1 ]; then
-                            python3 -c "
-import json, sys
-p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
-if k in d and v > d[k].get('last_downloaded', -1):
-    d[k]['last_downloaded'] = v
-    tmp = p + '.tmp'
-    json.dump(d, open(tmp, 'w'), indent=2)
-    import os; os.replace(tmp, p)
-" "$main_watchlist" "$al_id" "$ep_no"
-                        fi
+                        [ "$anidb_exact" = 1 ] && bump_main_watchlist "$al_id" "$ep_no"
                         continue
                     fi
                 fi
