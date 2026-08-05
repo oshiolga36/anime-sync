@@ -413,6 +413,28 @@ path, main_path, key = sys.argv[1], sys.argv[2], sys.argv[3]
 print(max(last_dl(path, key), last_dl(main_path, key)))
 " "$sync_state" "$main_watchlist" "$al_id")
 
+        # Reconcile main_watchlist up to what ani-cli itself already knows,
+        # every run - not just at the moment of a fresh download. Without
+        # this, a show ani-cli already finished in an earlier run (its own
+        # sync_state already covers it, nothing new to attempt here) never
+        # gets its bump written, because the per-episode write-back below
+        # only fires on a fresh success THIS run. anilist_sync.py then keeps
+        # retrying the same already-downloaded episode against AllAnime
+        # forever. Same trusted_id gate as every other main_watchlist write -
+        # only for shows whose allanime identifier is already validated.
+        if [ "$trusted_id" = 1 ]; then
+            python3 -c "
+import json, sys
+p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(p))
+if k in d and v > d[k].get('last_downloaded', -1):
+    d[k]['last_downloaded'] = v
+    tmp = p + '.tmp'
+    json.dump(d, open(tmp, 'w'), indent=2)
+    import os; os.replace(tmp, p)
+" "$main_watchlist" "$al_id" "$last"
+        fi
+
         show_dir="$anime_root/$folder"
         mkdir -p "$show_dir"
 
