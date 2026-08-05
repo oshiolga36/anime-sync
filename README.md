@@ -34,7 +34,7 @@ jellyfin_consolidator.py
 ```
 
 Both paths write into the same shared state (`watchlist.json`), so
-whichever one actually gets an episode down is the one that "wins" —
+whichever one actually gets an episode down is the one that "wins" -
 the other one won't re-download it.
 
 ## Components
@@ -54,7 +54,7 @@ the other one won't re-download it.
 - Python 3.10+
 - `pip install anipy-api anipy-cli rich pyyaml yt-dlp curl_cffi`
 - `ffmpeg` (yt-dlp uses it as a muxing fallback)
-- `fzf`, `mpv` — only needed for `ani-cli`'s interactive (non-`--sync`) mode
+- `fzf`, `mpv` - only needed for `ani-cli`'s interactive (non-`--sync`) mode
 
 ## Setup
 
@@ -68,21 +68,21 @@ the other one won't re-download it.
    `ani-cli` reads the same file (`ANIPY_CONFIG` env var to override).
 
 2. **Library root.** Set `ANIME_ROOT` to wherever your anime library lives
-   — this is used by the consolidator, `anilist_sync.py`'s download path,
+   - this is used by the consolidator, `anilist_sync.py`'s download path,
    and `ani-cli --sync`.
 
 3. **Optional curation files**, at the root of your library:
-   - `aliases.yaml` — maps alternate titles to the folder you actually want
+   - `aliases.yaml` - maps alternate titles to the folder you actually want
      used, e.g. when AniList's title differs from your existing folder name.
      `anilist_sync.py` appends to this automatically as it discovers shows;
      you only need to hand-edit it to fix a bad guess.
-   - `seasons.yaml` — forces a season number for folders the consolidator's
+   - `seasons.yaml` - forces a season number for folders the consolidator's
      regex-based guesser gets wrong (common with Japanese season markers
      like "San no Shou" or "2-nensei-hen").
 
 ## Running it without Jenkins
 
-Nothing here requires Jenkins — it's just three scripts you can run by hand
+Nothing here requires Jenkins - it's just three scripts you can run by hand
 or from any scheduler (cron, systemd timer, etc).
 
 ```sh
@@ -99,7 +99,7 @@ anything new (AllAnime first, anidb.app if AllAnime errors), and runs the
 consolidator itself when it's done. Useful as a cron job in its own right,
 or as a manual "is the main pipeline actually stuck?" check.
 
-Interactive mode still works exactly like upstream ani-cli — run it with
+Interactive mode still works exactly like upstream ani-cli - run it with
 no flags for the usual fzf search → pick episode → mpv flow.
 
 ### Environment variables
@@ -107,7 +107,7 @@ no flags for the usual fzf search → pick episode → mpv flow.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ANIPY_CONFIG` | `~/.config/anipy-cli/config.yaml` | Where the AniList token lives |
-| `ANIME_ROOT` | *(none — set this)* | Library root (both `--sync` and the consolidator) |
+| `ANIME_ROOT` | *(none - set this)* | Library root (both `--sync` and the consolidator) |
 | `ANI_CLI_ALLANIME_HELPER` | `~/scripts/ani-cli-allanime.py` | Path to the AllAnime helper |
 | `ANI_CLI_ANIDB_HELPER` | `~/scripts/ani-cli-anidb.py` | Path to the anidb.app helper |
 | `ANI_CLI_MAIN_WATCHLIST` | `~/scripts/anime-state/watchlist.json` | Shared state `anilist_sync.py` also reads/writes |
@@ -122,7 +122,7 @@ no flags for the usual fzf search → pick episode → mpv flow.
 The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 
 - **Automatic fallback.** If the main `sync` stage hard-fails, or exits
-  clean but every show failed/mixed results came back (soft failure —
+  clean but every show failed/mixed results came back (soft failure -
   e.g. a captcha or a broken upstream release), the `fallback-sync` stage
   runs `ani-cli --sync` automatically, no manual intervention.
 - **Telegram notifications**, including what the fallback actually grabbed
@@ -134,43 +134,43 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 
 ### Pipeline stages
 
-1. **deps** — installs/upgrades all Python deps into `$HOME/.local`.
-2. **sync** — runs `anilist_sync.py`. Graded `unstable` if any show came
+1. **deps** - installs/upgrades all Python deps into `$HOME/.local`.
+2. **sync** - runs `anilist_sync.py`. Graded `unstable` if any show came
    back as an error rather than a hard pipeline failure (the script itself
    always exits 0).
-3. **fallback-sync** *(conditional)* — runs only when `sync` failed or was
+3. **fallback-sync** *(conditional)* - runs only when `sync` failed or was
    graded unstable. Runs `ani-cli --sync` against the same watchlist.
-4. **consolidate** — runs the Jellyfin consolidator once, regardless of how
+4. **consolidate** - runs the Jellyfin consolidator once, regardless of how
    the earlier stages went (so partially-downloaded episodes still get
    organized).
 
 ### Jenkins setup
 
 - Mount a persistent directory for state, e.g. `/var/jenkins_home/anime-state`
-  (set via the `STATE` environment block in the `Jenkinsfile`) — this is
+  (set via the `STATE` environment block in the `Jenkinsfile`) - this is
   what survives workspace wipes between builds.
 - Mount `/srv/bot-secrets/bot.env` (read-only) with:
   ```sh
   TELEGRAM_TOKEN=...
   TELEGRAM_CHAT_ID=...
   ```
-  Telegram notification is best-effort — a missing/misconfigured secrets
+  Telegram notification is best-effort - a missing/misconfigured secrets
   file just silently skips notifying, it never fails the build.
 - The container needs `curl`, `python3`, `ffmpeg`, and network access to
   AniList, AllAnime/mkissa, and anidb.app.
 - Trigger builds via the standard Jenkins REST API (crumb + basic auth),
-  same as any other job — nothing anime-sync-specific about that part.
+  same as any other job - nothing anime-sync-specific about that part.
 
 ### Setting up the Telegram bot
 
 1. Message [`@BotFather`](https://t.me/BotFather) on Telegram, send
    `/newbot`, and follow the prompts (pick a name, pick a username ending
    in `bot`). It replies with a token that looks like
-   `123456789:AAF...` — that's your `TELEGRAM_TOKEN`.
+   `123456789:AAF...` - that's your `TELEGRAM_TOKEN`.
 2. Send your new bot any message first (bots can't message you until you've
    messaged them at least once).
 3. Get your chat ID: message [`@userinfobot`](https://t.me/userinfobot) (or
-   `@RawDataBot`) and it'll reply with your numeric `id` — that's your
+   `@RawDataBot`) and it'll reply with your numeric `id` - that's your
    `TELEGRAM_CHAT_ID`. (For a group chat instead of DMs: add your bot to the
    group, send a message, then check
    `https://api.telegram.org/bot<TELEGRAM_TOKEN>/getUpdates` for the
@@ -182,7 +182,7 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
    ```
 5. Mount that file read-only into the Jenkins container at
    `/srv/bot-secrets/bot.env` (or point the `notify()` function in the
-   `Jenkinsfile` at wherever you put it). No further setup needed — the
+   `Jenkinsfile` at wherever you put it). No further setup needed - the
    pipeline reads it fresh on every notification attempt.
 
 ## Known limitations
@@ -190,10 +190,10 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 - **Blind-search ceiling.** Both fallback paths (AllAnime and anidb) prefer
   an already-known/trusted identifier from `watchlist.json`, but fall back
   to a title search for shows the main pipeline hasn't mapped yet. A search
-  match isn't guaranteed to be the right show for very generic titles —
+  match isn't guaranteed to be the right show for very generic titles -
   interactive use lets you pick from the list; unattended `--sync` takes the
   best available match.
-- **anidb.app ranks by franchise popularity, not exact match** — a new/niche
+- **anidb.app ranks by franchise popularity, not exact match** - a new/niche
   show's title can land behind older same-name franchise entries in search
   results. `ani-cli` prefers an exact (case-insensitive) title match over
   "first result" for this reason, but an exact match isn't guaranteed to
@@ -202,7 +202,7 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
   browser TLS impersonation to get through it; if anidb.app tightens its
   protection further, this may need revisiting.
 - Neither fallback path knows anything the other doesn't share via
-  `watchlist.json` — if you run `ani-cli --sync` completely detached from
+  `watchlist.json` - if you run `ani-cli --sync` completely detached from
   the main pipeline's state file, you lose the "don't redownload what's
   already there" guarantee across paths (each still tracks its own state
   independently, so at worst you get a duplicate download that the
@@ -213,19 +213,19 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 This project is heavily inspired by, and directly builds on top of, two
 existing tools rather than reimplementing their hard parts from scratch:
 
-- [**anipy-cli**](https://github.com/sdaqo/anipy-cli) by sdaqo — `anilist_sync.py`
+- [**anipy-cli**](https://github.com/sdaqo/anipy-cli) by sdaqo - `anilist_sync.py`
   and the `ani-cli-allanime.py` helper are thin wrappers around its
   `AllAnimeProvider` and AniList integration. All of the actual AllAnime
   scraping and signed-request crypto is anipy-cli's, used as-is rather than
   re-derived.
 - [**ani-cli**](https://github.com/pystardust/ani-cli) by pystardust and
-  contributors — the `ani-cli` script here is a direct port of its UX,
+  contributors - the `ani-cli` script here is a direct port of its UX,
   structure, and a good deal of its actual shell code (menu flow, player
   detection, quality selection, download handling), adapted to call
   anipy-cli's provider instead of scraping directly, plus the AniList
   `--sync` mode and anidb.app fallback added on top.
 
-Both are licensed GPL-3.0, which is why this repository is too — see
+Both are licensed GPL-3.0, which is why this repository is too - see
 [`LICENSE`](LICENSE).
 
 ## License
