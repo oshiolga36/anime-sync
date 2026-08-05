@@ -481,7 +481,19 @@ if k in d and v > d[k].get('last_downloaded', -1):
                     # site-side outage, unlike "not released yet".
                     *"unknown error"*)
                         _anidb_err=$(mktemp)
-                        anidb_id=$(anidb_search "$al_title" 2>>"$_anidb_err" | head -n 1 | cut -f 1)
+                        anidb_list=$(anidb_search "$al_title" 2>>"$_anidb_err")
+                        # anidb ranks by franchise popularity, not exact match -
+                        # a title search for a new/niche show can bury the
+                        # actual hit under older same-name entries (e.g. "THE
+                        # GHOST IN THE SHELL" (2026) landing last behind a
+                        # dozen unrelated Ghost in the Shell franchise results).
+                        # Prefer an exact (case-insensitive) title match; only
+                        # fall back to "first result" when nothing matches.
+                        _al_lower=$(printf "%s" "$al_title" | tr '[:upper:]' '[:lower:]')
+                        anidb_id=$(printf "%s\n" "$anidb_list" | while IFS="	" read -r _id _title; do
+                            [ "$(printf "%s" "$_title" | tr '[:upper:]' '[:lower:]')" = "$_al_lower" ] && printf "%s\n" "$_id" && break
+                        done)
+                        [ -z "$anidb_id" ] && anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
                         if [ -n "$anidb_id" ] && anidb_episodes "$anidb_id" sub 2>>"$_anidb_err" | grep -qx "$ep_no"; then
                             anidb_links=$(anidb_video "$anidb_id" "$ep_no" sub 2>>"$_anidb_err" | sort -g -r -s)
                         fi
