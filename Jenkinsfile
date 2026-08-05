@@ -138,7 +138,7 @@ pipeline {
                     PATH="$HOME/.local/bin:$PATH" \
                     ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
                     ANI_CLI_ANIDB_HELPER="$(pwd)/ani-cli-anidb.py" \
-                    ANI_CLI_MAIN_WATCHLIST="$STATE/watchlist.json" \
+                    ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
                     ANI_CLI_FALLBACK_SUMMARY="$(pwd)/fallback_summary.json" \
                     ANI_CLI_SKIP_CONSOLIDATE=1 \
                     ./ani-cli --sync
