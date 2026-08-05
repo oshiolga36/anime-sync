@@ -67,9 +67,9 @@ the other one won't re-download it.
    ```
    `ani-cli` reads the same file (`ANIPY_CONFIG` env var to override).
 
-2. **Library root.** Defaults to `/data/media/Plex/Anime` (Linux) or
-   `Z:\Anime` (Windows, for `jellyfin_hook.py` if you're running that half
-   on a separate download box). Override with `ANIME_ROOT`.
+2. **Library root.** Set `ANIME_ROOT` to wherever your anime library lives
+   — this is used by the consolidator, `anilist_sync.py`'s download path,
+   and `ani-cli --sync`.
 
 3. **Optional curation files**, at the root of your library:
    - `aliases.yaml` — maps alternate titles to the folder you actually want
@@ -107,7 +107,7 @@ no flags for the usual fzf search → pick episode → mpv flow.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ANIPY_CONFIG` | `~/.config/anipy-cli/config.yaml` | Where the AniList token lives |
-| `ANIME_ROOT` | `/data/media/Plex/Anime` | Library root (both `--sync` and the consolidator) |
+| `ANIME_ROOT` | *(none — set this)* | Library root (both `--sync` and the consolidator) |
 | `ANI_CLI_ALLANIME_HELPER` | `~/scripts/ani-cli-allanime.py` | Path to the AllAnime helper |
 | `ANI_CLI_ANIDB_HELPER` | `~/scripts/ani-cli-anidb.py` | Path to the anidb.app helper |
 | `ANI_CLI_MAIN_WATCHLIST` | `~/scripts/anime-state/watchlist.json` | Shared state `anilist_sync.py` also reads/writes |
