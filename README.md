@@ -161,6 +161,30 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 - Trigger builds via the standard Jenkins REST API (crumb + basic auth),
   same as any other job — nothing anime-sync-specific about that part.
 
+### Setting up the Telegram bot
+
+1. Message [`@BotFather`](https://t.me/BotFather) on Telegram, send
+   `/newbot`, and follow the prompts (pick a name, pick a username ending
+   in `bot`). It replies with a token that looks like
+   `123456789:AAF...` — that's your `TELEGRAM_TOKEN`.
+2. Send your new bot any message first (bots can't message you until you've
+   messaged them at least once).
+3. Get your chat ID: message [`@userinfobot`](https://t.me/userinfobot) (or
+   `@RawDataBot`) and it'll reply with your numeric `id` — that's your
+   `TELEGRAM_CHAT_ID`. (For a group chat instead of DMs: add your bot to the
+   group, send a message, then check
+   `https://api.telegram.org/bot<TELEGRAM_TOKEN>/getUpdates` for the
+   group's `chat.id`, which will be negative.)
+4. Put both values in `bot.env`:
+   ```sh
+   TELEGRAM_TOKEN=123456789:AAF...
+   TELEGRAM_CHAT_ID=123456789
+   ```
+5. Mount that file read-only into the Jenkins container at
+   `/srv/bot-secrets/bot.env` (or point the `notify()` function in the
+   `Jenkinsfile` at wherever you put it). No further setup needed — the
+   pipeline reads it fresh on every notification attempt.
+
 ## Known limitations
 
 - **Blind-search ceiling.** Both fallback paths (AllAnime and anidb) prefer
@@ -183,3 +207,27 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
   already there" guarantee across paths (each still tracks its own state
   independently, so at worst you get a duplicate download that the
   consolidator will resolve by keeping the larger file).
+
+## Acknowledgments
+
+This project is heavily inspired by, and directly builds on top of, two
+existing tools rather than reimplementing their hard parts from scratch:
+
+- [**anipy-cli**](https://github.com/sdaqo/anipy-cli) by sdaqo — `anilist_sync.py`
+  and the `ani-cli-allanime.py` helper are thin wrappers around its
+  `AllAnimeProvider` and AniList integration. All of the actual AllAnime
+  scraping and signed-request crypto is anipy-cli's, used as-is rather than
+  re-derived.
+- [**ani-cli**](https://github.com/pystardust/ani-cli) by pystardust and
+  contributors — the `ani-cli` script here is a direct port of its UX,
+  structure, and a good deal of its actual shell code (menu flow, player
+  detection, quality selection, download handling), adapted to call
+  anipy-cli's provider instead of scraping directly, plus the AniList
+  `--sync` mode and anidb.app fallback added on top.
+
+Both are licensed GPL-3.0, which is why this repository is too — see
+[`LICENSE`](LICENSE).
+
+## License
+
+[GPL-3.0](LICENSE), consistent with both projects this builds on.
