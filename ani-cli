@@ -480,10 +480,18 @@ if k in d and v > d[k].get('last_downloaded', -1):
                     # "Server responded with unknown error: <code>" - a real
                     # site-side outage, unlike "not released yet".
                     *"unknown error"*)
-                        anidb_id=$(anidb_search "$al_title" 2>/dev/null | head -n 1 | cut -f 1)
-                        if [ -n "$anidb_id" ] && anidb_episodes "$anidb_id" sub 2>/dev/null | grep -qx "$ep_no"; then
-                            anidb_links=$(anidb_video "$anidb_id" "$ep_no" sub 2>/dev/null | sort -g -r -s)
+                        _anidb_err=$(mktemp)
+                        anidb_id=$(anidb_search "$al_title" 2>>"$_anidb_err" | head -n 1 | cut -f 1)
+                        if [ -n "$anidb_id" ] && anidb_episodes "$anidb_id" sub 2>>"$_anidb_err" | grep -qx "$ep_no"; then
+                            anidb_links=$(anidb_video "$anidb_id" "$ep_no" sub 2>>"$_anidb_err" | sort -g -r -s)
                         fi
+                        # Swallowing this would make "anidb has no match" and
+                        # "anidb helper itself is broken" look identical - the
+                        # exact bug already fixed once for the allanime path.
+                        if [ -z "$anidb_links" ] && [ -s "$_anidb_err" ]; then
+                            printf "\33[2K\r\033[1;33m  anidb fallback also failed: %s\033[0m\n" "$(tail -1 "$_anidb_err")" >&2
+                        fi
+                        rm -f "$_anidb_err"
                         ;;
                 esac
 
