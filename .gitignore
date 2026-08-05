@@ -4,3 +4,4 @@ download_state.json
 *.log
 summary.json
 alert.txt
+__pycache__/
