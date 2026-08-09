@@ -30,21 +30,6 @@ def syncState() {
     return sh(script: 'python3 summary_text.py --state', returnStdout: true).trim()
 }
 
-// Empty when the fallback-sync stage didn't run this build. Otherwise ani-cli
-// wrote fallback_summary.json in the same {"stats":..., "shows":[...]} shape
-// as anilist_sync's own summary.json, so summary_text.py's build()/state()
-// format it too — no second formatter, and this actually says what (if
-// anything) the fallback grabbed instead of just "it ran".
-def fallbackBody() {
-    if (env.FALLBACK_FIRED != 'true') return ''
-    def fbState = sh(script: 'python3 summary_text.py --file fallback_summary.json --state 2>/dev/null || true', returnStdout: true).trim()
-    if (fbState in ['new', 'mixed']) {
-        def fb = sh(script: 'python3 summary_text.py --file fallback_summary.json 2>/dev/null || true', returnStdout: true).trim()
-        return "\n\n🔁 Fallback (AllAnime via ani-cli) grabbed more:\n${fb}"
-    }
-    return "\n\n🔁 Fallback also ran (AllAnime via ani-cli) — hit the same wall, nothing extra."
-}
-
 // ['notify'|'suppress'|'recovered'|'quiet', <recovered titles>] from post/always
 def alert() {
     def lines = readFile('alert.txt').trim().split('\n')
@@ -83,14 +68,35 @@ pipeline {
                 // Same upgrade the cron line did, into $HOME/.local (persisted volume).
                 // rich/pyyaml are imported directly by the scripts and are NOT
                 // guaranteed transitive deps of anipy — pin them here explicitly.
-                // yt-dlp is for ani-cli's fallback-sync stage below (ffmpeg alone
-                // can't handle every embed host's auth/HLS quirks). curl_cffi is
-                // for ani-cli-anidb.py's second-chance provider - anidb.app sits
-                // behind Cloudflare and plain requests/curl gets the JS challenge.
-                sh 'pip install --user --break-system-packages --upgrade anipy-api anipy-cli rich pyyaml yt-dlp curl_cffi'
+                // yt-dlp is for ani-cli's downloads (ffmpeg alone can't handle
+                // every embed host's auth/HLS quirks). curl_cffi is for
+                // ani-cli-anidb.py - anidb.app sits behind Cloudflare and plain
+                // requests/curl gets the JS challenge.
+                //
+                // anipy-api is PINNED, deliberately. It is no longer the sync
+                // driver (see the sync stage) - it is kept only because
+                // ani-cli-allanime.py imports AllAnimeProvider from it directly.
+                // An unpinned `--upgrade` here is what silently broke this job
+                // on 2026-08-08: 3.9.0 dropped 'allanime' from its provider
+                // registry, so anilist_sync.py failed all 15 shows with
+                // "Provider 'allanime' not found" every run for a day. Never
+                // let an unattended pipeline float its own dependency.
+                sh 'pip install --user --break-system-packages anipy-api==3.9.0 && pip install --user --break-system-packages --upgrade rich pyyaml yt-dlp curl_cffi'
             }
         }
 
+        // ani-cli is the sync driver as of 2026-08-09, replacing anilist_sync.py.
+        // anipy-api 3.9.0 removed 'allanime' from its provider registry, so
+        // anilist_sync.py (which resolves providers by name) errored on every
+        // show. ani-cli reaches AllAnime by importing the provider class
+        // directly, which still works, and falls back to anidb.app when the
+        // site itself is captcha-gated - so it survives both failure modes that
+        // have taken this job down. anilist_sync.py is kept in the repo but is
+        // no longer wired in; see README for re-enabling it.
+        //
+        // It writes summary.json in the same {"stats":..,"shows":[..]} shape
+        // anilist_sync.py did, so every notification/grading path below is
+        // unchanged.
         stage('sync') {
             steps {
                 // The old crontab chained with `;` so the consolidator ran even when
@@ -99,11 +105,18 @@ pipeline {
                 // still goes red, but the consolidate stage still runs.
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     sh '''
+                        set +x
                         mkdir -p "$STATE"
                         # stale summary from the previous build must not be reported as this one's
                         rm -f summary.json
                         [ -f "$STATE/watchlist.json" ] && cp "$STATE/watchlist.json" watchlist.json
-                        python3 anilist_sync.py
+                        PATH="$HOME/.local/bin:$PATH" \
+                        ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
+                        ANI_CLI_ANIDB_HELPER="$(pwd)/ani-cli-anidb.py" \
+                        ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
+                        ANI_CLI_FALLBACK_SUMMARY="$(pwd)/summary.json" \
+                        ANI_CLI_SKIP_CONSOLIDATE=1 \
+                        ./ani-cli --sync
                     '''
                 }
                 // anilist_sync exits 0 even when individual shows fail, so the shell
@@ -114,36 +127,6 @@ pipeline {
                         unstable('one or more shows failed to sync')
                     }
                 }
-            }
-        }
-
-        // Runs on BOTH a hard failure (sync stage threw) and a soft one (exited
-        // clean but downloaded nothing, e.g. the NEED_CAPTCHA/query_hash bug) —
-        // syncState() catches the soft case, currentResult catches the hard one.
-        // Same AllAnime backend/account as anilist_sync.py, just a standalone
-        // path (see ~/scripts/ani-cli on the host for the ponytail/design notes)
-        // that doesn't depend on whatever broke the anipy-api path this time.
-        // Runs before 'consolidate' so anything it grabs gets organised in the
-        // same build, not left raw until the next scheduled run.
-        stage('fallback-sync') {
-            when {
-                anyOf {
-                    expression { currentBuild.currentResult == 'FAILURE' }
-                    expression { syncState() in ['errors', 'mixed'] }
-                }
-            }
-            steps {
-                sh '''
-                    set +x
-                    PATH="$HOME/.local/bin:$PATH" \
-                    ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
-                    ANI_CLI_ANIDB_HELPER="$(pwd)/ani-cli-anidb.py" \
-                    ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
-                    ANI_CLI_FALLBACK_SUMMARY="$(pwd)/fallback_summary.json" \
-                    ANI_CLI_SKIP_CONSOLIDATE=1 \
-                    ./ani-cli --sync
-                '''
-                script { env.FALLBACK_FIRED = 'true' }
             }
         }
 
@@ -181,21 +164,19 @@ pipeline {
         unstable {
             script {
                 def (verdict, _) = alert()
-                def fallback = fallbackBody()
                 // Same shows failing the same way as last run: stay quiet. 12 identical
                 // alerts a day is how people learn to ignore alerts. A manual run always
-                // answers, and any CHANGE in what is broken breaks through. A fired
-                // fallback is itself new information, so it always breaks through too.
-                if (verdict != 'suppress' || !scheduled() || fallback) {
+                // answers, and any CHANGE in what is broken breaks through.
+                if (verdict != 'suppress' || !scheduled()) {
                     def head = syncState() == 'mixed' ? "⚠️ Some episodes arrived, some shows failed"
                                                       : "⚠️ Nothing downloaded — shows are failing"
-                    notify("${head}\n\n${summaryBody()}${fallback}\n\nLog: ${env.BUILD_URL}console")
+                    notify("${head}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
                 }
             }
         }
         failure {
             script {
-                notify("🔥 Sync broke — build ${env.BUILD_NUMBER}\n\n${summaryBody()}${fallbackBody()}\n\nLog: ${env.BUILD_URL}console")
+                notify("🔥 Sync broke — build ${env.BUILD_NUMBER}\n\n${summaryBody()}\n\nLog: ${env.BUILD_URL}console")
             }
         }
         aborted {
