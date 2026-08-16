@@ -159,6 +159,12 @@ anidb_video() {
     python3 "$anidb_helper" video "$1" "$2" "$3"
 }
 
+# $1 id, $2 our episode number, $3 exact-title-match flag. Prints anidb's
+# number for that episode, or nothing if it can't map it confidently.
+anidb_episode_for() {
+    python3 "$anidb_helper" episode-for "$1" "$2" "$3"
+}
+
 # select the quality according to the setting
 select_quality() {
     case "$1" in
@@ -525,8 +531,18 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                             anidb_exact=0
                             anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
                         fi
-                        if [ -n "$anidb_id" ] && anidb_episodes "$anidb_id" sub 2>>"$_anidb_err" | grep -qx "$ep_no"; then
-                            anidb_links=$(anidb_video "$anidb_id" "$ep_no" sub 2>>"$_anidb_err" | sort -g -r -s)
+                        # anidb may number a sequel cour absolutely across the
+                        # whole series (BLEACH TYBW = 41-44, Re:ZERO S4 = 67-78)
+                        # while AniList restarts at 1, so a literal grep for
+                        # "$ep_no" finds nothing and the fallback declines a
+                        # show anidb actually has. episode-for translates it,
+                        # and returns empty rather than guess - see map_episode.
+                        if [ -n "$anidb_id" ]; then
+                            _anidb_ep=$(anidb_episode_for "$anidb_id" "$ep_no" "$anidb_exact" 2>>"$_anidb_err")
+                            if [ -n "$_anidb_ep" ]; then
+                                [ "$_anidb_ep" != "$ep_no" ] && info "  anidb numbers this cour absolutely: episode $ep_no is $_anidb_ep there"
+                                anidb_links=$(anidb_video "$anidb_id" "$_anidb_ep" sub 2>>"$_anidb_err" | sort -g -r -s)
+                            fi
                         fi
                         # Swallowing this would make "anidb has no match" and
                         # "anidb helper itself is broken" look identical - the

@@ -48,6 +48,43 @@ def cmd_episodes(identifier: str, _lang: str) -> None:
         print(ep["number"])
 
 
+def map_episode(eps: list, want: str, exact: bool):
+    """Translate an AniList episode number into anidb's number for this entry.
+
+    anidb sometimes numbers a sequel cour *absolutely* across the whole series
+    while AniList restarts at 1: BLEACH TYBW "The Calamity" is 41-44, Re:ZERO
+    S4 is 67-78. When the anidb entry covers exactly one cour - which an exact
+    title match assures - position in its episode list IS our episode number.
+    Verified against real streams: anidb 43 has the same runtime as our S01E03.
+
+    Returns None rather than guessing. A silently wrong episode is worse than
+    a missed one, so the offset only applies when the list is contiguous, the
+    title matched exactly, and `want` is in range.
+    """
+    try:
+        w = int(want)
+    except (TypeError, ValueError):
+        return None  # non-whole episode (24.5 etc): only ever exact-match
+    if w in eps:
+        return w
+    if not (exact and eps):
+        return None
+    contiguous = eps == list(range(eps[0], eps[0] + len(eps)))
+    if contiguous and 1 <= w <= len(eps):
+        return eps[w - 1]
+    return None
+
+
+def cmd_episode_for(identifier: str, want: str, exact: str) -> None:
+    s = _session()
+    numeric_id = identifier.rsplit("-", 1)[-1]
+    data = s.get(f"{BASE}/api/frontend/anime/{numeric_id}/episodes", timeout=15).json()
+    eps = [e["number"] for e in data["episodes"]]
+    got = map_episode(eps, want, exact == "1")
+    if got is not None:
+        print(got)
+
+
 def _episode_id(s: "requests.Session", identifier: str, episode: str) -> int:
     numeric_id = identifier.rsplit("-", 1)[-1]
     data = s.get(f"{BASE}/api/frontend/anime/{numeric_id}/episodes", timeout=15).json()
@@ -85,9 +122,32 @@ def cmd_video(identifier: str, episode: str, lang: str) -> None:
 
 
 def demo() -> None:
-    # no network: just proves argv dispatch doesn't crash/typo
+    # no network: argv dispatch + the episode-number mapping, which is the
+    # only real logic in here and the one that can silently fetch the WRONG
+    # episode if it regresses.
     assert BASE == "https://anidb.app"
-    print("ani-cli-anidb dispatch ok")
+
+    normal = [1, 2, 3, 4]
+    bleach = [41, 42, 43, 44]          # real: TYBW "The Calamity"
+    rezero = list(range(67, 79))       # real: Re:ZERO S4, 12 eps
+
+    # direct hit always wins, regardless of exactness
+    assert map_episode(normal, "3", True) == 3
+    assert map_episode(normal, "3", False) == 3
+    # absolute numbering -> position in list (the cases seen in the wild)
+    assert map_episode(bleach, "3", True) == 43
+    assert map_episode(bleach, "4", True) == 44
+    assert map_episode(rezero, "12", True) == 78
+    assert map_episode(rezero, "1", True) == 67
+    # never offset on a fuzzy title match - could be a different show
+    assert map_episode(bleach, "4", False) is None
+    # out of range, gappy list, and non-whole episodes all decline
+    assert map_episode(bleach, "5", True) is None
+    assert map_episode(bleach, "0", True) is None
+    assert map_episode([41, 42, 44], "3", True) is None
+    assert map_episode(bleach, "24.5", True) is None
+    assert map_episode([], "1", True) is None
+    print("ani-cli-anidb dispatch + episode mapping ok")
 
 
 if __name__ == "__main__":
@@ -106,6 +166,8 @@ if __name__ == "__main__":
             cmd_episodes(args[0], args[1])
         elif cmd == "video" and len(args) == 3:
             cmd_video(args[0], args[1], args[2])
+        elif cmd == "episode-for" and len(args) == 3:
+            cmd_episode_for(args[0], args[1], args[2])
         else:
             sys.exit("bad arguments")
     except Exception as e:
