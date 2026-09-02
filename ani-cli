@@ -348,6 +348,21 @@ resolve_folder() {
     sanitize_name "$_title"
 }
 
+# AniList and anidb sometimes name the same show differently - "Dara-san of
+# the Reiwa Era" is just "Dara-san of Reiwa" there - which defeats the exact
+# title match and leaves only ambiguous fuzzy hits, so the fallback declines
+# a show anidb actually has. anidb_aliases.yaml maps AniList title -> anidb
+# title; same file format and parsing as aliases.yaml above.
+resolve_anidb_title() {
+    _title="$1"
+    _alias_file="$anime_root/anidb_aliases.yaml"
+    if [ -f "$_alias_file" ]; then
+        _mapped=$(sed -nE "s|^\"?${_title}\"?:[[:space:]]*\"?([^\"]+)\"?[[:space:]]*\$|\1|p" "$_alias_file" | head -n 1)
+        [ -n "$_mapped" ] && printf "%s" "$_mapped" && return 0
+    fi
+    printf "%s" "$_title"
+}
+
 sync_mode() {
     dep_ch python3
     dep_ch_failover "yt-dlp,ffmpeg" >/dev/null || die "Neither yt-dlp nor ffmpeg found"
@@ -513,7 +528,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     # site-side outage, unlike "not released yet".
                     *"unknown error"*)
                         _anidb_err=$(mktemp)
-                        anidb_list=$(anidb_search "$al_title" 2>>"$_anidb_err")
+                        _anidb_title=$(resolve_anidb_title "$al_title")
+                        anidb_list=$(anidb_search "$_anidb_title" 2>>"$_anidb_err")
                         # anidb ranks by franchise popularity, not exact match -
                         # a title search for a new/niche show can bury the
                         # actual hit under older same-name entries (e.g. "THE
@@ -521,15 +537,30 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # dozen unrelated Ghost in the Shell franchise results).
                         # Prefer an exact (case-insensitive) title match; only
                         # fall back to "first result" when nothing matches.
-                        _al_lower=$(printf "%s" "$al_title" | tr '[:upper:]' '[:lower:]')
+                        _al_lower=$(printf "%s" "$_anidb_title" | tr '[:upper:]' '[:lower:]')
                         anidb_id=$(printf "%s\n" "$anidb_list" | while IFS="	" read -r _id _title; do
                             [ "$(printf "%s" "$_title" | tr '[:upper:]' '[:lower:]')" = "$_al_lower" ] && printf "%s\n" "$_id" && break
                         done)
                         if [ -n "$anidb_id" ]; then
                             anidb_exact=1
                         else
+                            # No exact match. "First result" is only safe when
+                            # the search was UNAMBIGUOUS - one hit, so there is
+                            # nothing else it could have meant (AniList and
+                            # anidb often disagree on season wording: "...
+                            # Master Swordsman II" vs "... Season 2"). With
+                            # several hits the top one is just anidb's
+                            # popularity ranking: searching "Dara-san of the
+                            # Reiwa Era" returns Food Wars first, and taking it
+                            # would file someone else's episode under this show.
                             anidb_exact=0
-                            anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
+                            if [ "$(printf "%s\n" "$anidb_list" | grep -c .)" = 1 ]; then
+                                anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
+                            else
+                                anidb_id=""
+                                printf "\33[2K\r\033[1;33m  anidb: no exact title match and %s ambiguous hits, not guessing\033[0m\n" \
+                                    "$(printf "%s\n" "$anidb_list" | grep -c .)" >&2
+                            fi
                         fi
                         # anidb may number a sequel cour absolutely across the
                         # whole series (BLEACH TYBW = 41-44, Re:ZERO S4 = 67-78)
