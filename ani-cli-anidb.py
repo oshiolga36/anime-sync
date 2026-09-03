@@ -31,11 +31,23 @@ def _session() -> requests.Session:
     return s
 
 
+def _get(s: "requests.Session", url: str, **kw):
+    """GET that fails loudly. Without the status check a 503 maintenance page
+    or a Cloudflare block just yields no regex matches and exits 0, which the
+    caller cannot tell apart from "this show genuinely isn't on anidb" - so a
+    site outage got reported as a title-matching problem (seen 2026-09-03,
+    anidb served 503 "Under Maintenance" for hours)."""
+    r = s.get(url, timeout=kw.pop("timeout", 15), **kw)
+    if r.status_code != 200:
+        raise RuntimeError(f"anidb.app returned HTTP {r.status_code} for {url}")
+    if "Just a moment" in r.text[:4000]:
+        raise RuntimeError("blocked by cloudflare")
+    return r
+
+
 def cmd_search(query: str) -> None:
     s = _session()
-    page = s.get(f"{BASE}/browse", params={"q": query}, timeout=15).text
-    if "Just a moment" in page:
-        raise RuntimeError("blocked by cloudflare")
+    page = _get(s, f"{BASE}/browse", params={"q": query}).text
     for aid, title in re.findall(r'anime/([a-z0-9-]+-[0-9]+)"[^>]*title="([^"]+)"', page):
         print(f"{aid}\t{html.unescape(title)}")
 
@@ -43,7 +55,7 @@ def cmd_search(query: str) -> None:
 def cmd_episodes(identifier: str, _lang: str) -> None:
     s = _session()
     numeric_id = identifier.rsplit("-", 1)[-1]
-    data = s.get(f"{BASE}/api/frontend/anime/{numeric_id}/episodes", timeout=15).json()
+    data = _get(s, f"{BASE}/api/frontend/anime/{numeric_id}/episodes").json()
     for ep in data["episodes"]:
         print(ep["number"])
 
@@ -78,7 +90,7 @@ def map_episode(eps: list, want: str, exact: bool):
 def cmd_episode_for(identifier: str, want: str, exact: str) -> None:
     s = _session()
     numeric_id = identifier.rsplit("-", 1)[-1]
-    data = s.get(f"{BASE}/api/frontend/anime/{numeric_id}/episodes", timeout=15).json()
+    data = _get(s, f"{BASE}/api/frontend/anime/{numeric_id}/episodes").json()
     eps = [e["number"] for e in data["episodes"]]
     got = map_episode(eps, want, exact == "1")
     if got is not None:
@@ -87,7 +99,7 @@ def cmd_episode_for(identifier: str, want: str, exact: str) -> None:
 
 def _episode_id(s: "requests.Session", identifier: str, episode: str) -> int:
     numeric_id = identifier.rsplit("-", 1)[-1]
-    data = s.get(f"{BASE}/api/frontend/anime/{numeric_id}/episodes", timeout=15).json()
+    data = _get(s, f"{BASE}/api/frontend/anime/{numeric_id}/episodes").json()
     ep_no = float(episode)
     for ep in data["episodes"]:
         if ep["number"] == ep_no or ep["number"] == int(ep_no):
@@ -99,13 +111,13 @@ def cmd_video(identifier: str, episode: str, lang: str) -> None:
     s = _session()
     ep_id = _episode_id(s, identifier, episode)
 
-    langs = s.get(f"{BASE}/api/frontend/episode/{ep_id}/languages", timeout=15).json()["languages"]
+    langs = _get(s, f"{BASE}/api/frontend/episode/{ep_id}/languages").json()["languages"]
     code = "eng" if lang == "dub" else "jpn"
     embed_url = next((e["embed_url"] for e in langs if e["code"] == code), None)
     if not embed_url:
         raise RuntimeError(f"no {lang} stream for episode {episode}")
 
-    embed_page = s.get(embed_url, timeout=15).text
+    embed_page = _get(s, embed_url).text
     m = re.search(r"file:\s*'([^']*)'", embed_page)
     if not m:
         raise RuntimeError("could not find m3u8 master url in embed page")

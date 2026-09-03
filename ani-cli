@@ -446,13 +446,39 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             anime_list=$(allanime_search "$al_title")
             anime_id=$(printf "%s" "$anime_list" | head -n 1 | cut -f 1)
         fi
+        # AllAnime couldn't identify the show at all. Don't skip it - that made
+        # AllAnime a hard gate on a provider that is otherwise dead, and left
+        # shows it has never heard of (Dara-san) permanently undownloadable even
+        # though anidb had every episode. Fall through to an anidb-only pass:
+        # our episode numbers are 1..N over anidb's own list, which the fallback
+        # below then translates back with episode-for.
+        anidb_only=0
         if [ -z "$anime_id" ]; then
+            _t=$(resolve_anidb_title "$al_title")
+            _l=$(anidb_search "$_t" 2>/dev/null)
+            _tl=$(printf "%s" "$_t" | tr '[:upper:]' '[:lower:]')
+            _i=$(printf "%s\n" "$_l" | while IFS="	" read -r _id _title; do
+                [ "$(printf "%s" "$_title" | tr '[:upper:]' '[:lower:]')" = "$_tl" ] && printf "%s\n" "$_id" && break
+            done)
+            # same "never guess between ambiguous hits" rule as the fallback
+            [ -z "$_i" ] && [ "$(printf "%s\n" "$_l" | grep -c .)" = 1 ] && _i=$(printf "%s" "$_l" | head -n 1 | cut -f 1)
+            if [ -n "$_i" ]; then
+                _n=$(anidb_episodes "$_i" sub 2>/dev/null | grep -c .)
+                if [ "$_n" -gt 0 ] 2>/dev/null; then
+                    anidb_only=1
+                    ep_list=$(seq 1 "$_n")
+                    info "  no allanime match; using anidb directly ($_n episodes)"
+                fi
+            fi
+        fi
+        if [ -z "$anime_id" ] && [ "$anidb_only" = 0 ]; then
             printf "\33[2K\r\033[1;31m  no allanime match for %s\033[0m\n" "$al_title" >&2
             printf "failed\t%s\t\tno allanime match\n" "$al_title" >>"$results_tmp"
             continue
         fi
 
-        ep_list="$(allanime_episodes "$anime_id" sub | sort -n)"
+        # anidb_only already built ep_list from anidb's own list above
+        [ "$anidb_only" = 0 ] && ep_list="$(allanime_episodes "$anime_id" sub | sort -n)"
         last=$(python3 -c "
 import json, sys
 def last_dl(path, key):
@@ -486,7 +512,13 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
             _attempted=1
             info "  downloading episode $ep_no"
             _err_file=$(mktemp)
-            links=$(allanime_video "$anime_id" "$ep_no" sub 2>"$_err_file" | sort -g -r -s)
+            if [ "$anidb_only" = 1 ]; then
+                # no allanime id to ask - go straight to the fallback below
+                links=""
+                printf "error: no allanime match for this show\n" >"$_err_file"
+            else
+                links=$(allanime_video "$anime_id" "$ep_no" sub 2>"$_err_file" | sort -g -r -s)
+            fi
             if [ -n "$links" ]; then
                 _top=$(printf "%s" "$links" | head -n 1)
                 video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
@@ -525,8 +557,10 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 case "$_reason" in
                     # anipy_api wraps both NEED_CAPTCHA and AA_CRYPTO_STALE as
                     # "Server responded with unknown error: <code>" - a real
-                    # site-side outage, unlike "not released yet".
-                    *"unknown error"*)
+                    # site-side outage, unlike "not released yet". The second
+                    # pattern is the anidb_only path, where there is no
+                    # allanime id to have asked in the first place.
+                    *"unknown error"* | *"no allanime match"*)
                         _anidb_err=$(mktemp)
                         _anidb_title=$(resolve_anidb_title "$al_title")
                         anidb_list=$(anidb_search "$_anidb_title" 2>>"$_anidb_err")
@@ -554,12 +588,22 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                             # Reiwa Era" returns Food Wars first, and taking it
                             # would file someone else's episode under this show.
                             anidb_exact=0
-                            if [ "$(printf "%s\n" "$anidb_list" | grep -c .)" = 1 ]; then
+                            _hits=$(printf "%s\n" "$anidb_list" | grep -c .)
+                            if [ "$_hits" = 1 ]; then
                                 anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
                             else
                                 anidb_id=""
-                                printf "\33[2K\r\033[1;33m  anidb: no exact title match and %s ambiguous hits, not guessing\033[0m\n" \
-                                    "$(printf "%s\n" "$anidb_list" | grep -c .)" >&2
+                                # Say which of the three it actually is. "0 hits"
+                                # was reported as a matching problem during a
+                                # site outage until the helper learned to fail
+                                # loudly on non-200 - don't re-introduce that.
+                                if [ -s "$_anidb_err" ]; then
+                                    printf "\33[2K\r\033[1;33m  anidb unreachable: %s\033[0m\n" "$(sed -n 's/^error: //p' "$_anidb_err" | tail -1)" >&2
+                                elif [ "$_hits" = 0 ]; then
+                                    printf "\33[2K\r\033[1;33m  anidb has no entry for '%s'\033[0m\n" "$_anidb_title" >&2
+                                else
+                                    printf "\33[2K\r\033[1;33m  anidb: no exact title match and %s ambiguous hits, not guessing (add an anidb_aliases.yaml entry)\033[0m\n" "$_hits" >&2
+                                fi
                             fi
                         fi
                         # anidb may number a sequel cour absolutely across the
@@ -586,7 +630,11 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 esac
 
                 if [ -n "$anidb_links" ]; then
-                    info "  AllAnime down ($_reason), got episode $ep_no from anidb.app instead"
+                    if [ "$anidb_only" = 1 ]; then
+                        info "  got episode $ep_no from anidb.app"
+                    else
+                        info "  AllAnime down ($_reason), got episode $ep_no from anidb.app instead"
+                    fi
                     _top=$(printf "%s" "$anidb_links" | head -n 1)
                     video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
                     video_referrer=""
