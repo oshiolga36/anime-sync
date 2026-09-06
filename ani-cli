@@ -232,11 +232,19 @@ pick_match() {
 # be a copy of this logic per provider; adding anikoto as a fourth would have
 # meant a third copy.
 provider_links() {
-    _pl_prov="$1"; _pl_title="$2"; _pl_ep="$3"
+    _pl_prov="$1"; _pl_title="$2"; _pl_ep="$3"; _pl_want_exact="${4:-0}"
     _pl_cands=$(pick_match "$("${_pl_prov}_search" "$_pl_title" 2>>"$_fb_err")" "$_pl_title")
     [ -z "$_pl_cands" ] && return 1
     printf "%s\n" "$_pl_cands" | while IFS="	" read -r _pl_id _pl_exact; do
         [ -z "$_pl_id" ] && continue
+        # On the first pass only exact title matches are allowed, so that an
+        # exact hit on a later provider beats a fuzzy one on an earlier one.
+        # animehub lists this show only under its romaji title, which the
+        # single-hit rule accepts - and that entry serves the 9-minute
+        # short-form cut. anikoto has an exact match with the real 24-minute
+        # episodes, but came second, so the short version won and quietly
+        # landed in the library as episode 9.
+        [ "$_pl_want_exact" = 1 ] && [ "$_pl_exact" != 1 ] && continue
         # anidb numbers some cours absolutely (BLEACH 41-44, Re:ZERO 67-78)
         # while AniList restarts at 1; the others match AniList directly.
         if [ "$_pl_prov" = "anidb" ]; then
@@ -670,13 +678,20 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # anikoto has the widest current-season catalogue but
                         # more indirection per episode; anidb last because it
                         # needs numbering translation and has been the flakiest.
+                        # Two passes: every provider's EXACT title match first,
+                        # only then fuzzy single-hit matches. Provider order
+                        # alone must not let a loose match on one site outrank
+                        # an exact one on another.
                         _fb_title=$(resolve_anidb_title "$al_title")
-                        for _prov in animehub anikoto anidb; do
-                            anidb_links=$(provider_links "$_prov" "$_fb_title" "$ep_no")
-                            if [ -n "$anidb_links" ]; then
-                                _fb_src="$_prov"
-                                break
-                            fi
+                        for _pass in 1 0; do
+                            for _prov in animehub anikoto anidb; do
+                                anidb_links=$(provider_links "$_prov" "$_fb_title" "$ep_no" "$_pass")
+                                if [ -n "$anidb_links" ]; then
+                                    _fb_src="$_prov"
+                                    break
+                                fi
+                            done
+                            [ -n "$anidb_links" ] && break
                         done
 
                         if [ -z "$anidb_links" ]; then
