@@ -317,6 +317,47 @@ download() {
     ffmpeg -loglevel error -stats ${_ref_ffmpeg:+$_ref_ffmpeg "Referer: $video_referrer"} -i "$1" -c copy "$download_dir/$2.mp4" $3
 }
 
+# runtime of a video file in whole seconds, empty if unreadable
+_duration() {
+    ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null | cut -d. -f1
+}
+
+# Is this file's runtime in line with the show's other episodes?
+# The tell for every "silently wrong file" we have hit: a short-form "[Mini]"
+# cut served in place of the real series (8m56s vs 24m), a truncated download
+# from skipped fragments (14m27s vs 24m), a wrong-show match. Any of those
+# passes the downloader's own success check and gets filed as the episode.
+# Only a LOWER bound, deliberately: double-length premieres and finales are
+# routine (Fate/stay night UBW runs 47-50m, Owarimonogatari 66m, against ~24m
+# siblings), so an upper bound just rejects good files - measured against the
+# real library, it produced 9 false positives and caught nothing extra. Short
+# is the signal that actually means broken. Returns success when it cannot
+# tell (no ffprobe, no siblings yet, brand new show): refusing to guess beats
+# blocking a legitimate first download.
+plausible_duration() {
+    command -v ffprobe >/dev/null 2>&1 || return 0
+    _pd_new=$(_duration "$1")
+    [ -z "$_pd_new" ] && return 1          # unreadable = broken, reject
+    _pd_ref=$(find "${show_dir:-$download_dir}" -name '*.mp4' ! -name "$(basename "$1")" 2>/dev/null |
+        head -n 5 | while IFS= read -r _pd_f; do _duration "$_pd_f"; done |
+        sort -n | awk '{a[NR]=$1} END{if (NR) print a[int((NR+1)/2)]}')
+    [ -z "$_pd_ref" ] || [ "$_pd_ref" -lt 1 ] 2>/dev/null && return 0
+    awk -v n="$_pd_new" -v r="$_pd_ref" 'BEGIN{exit !(n >= r*0.5)}'
+}
+
+# download + sanity check. Used by --sync only; the interactive path streams
+# to a player and has a human watching it.
+download_checked() {
+    download "$1" "$2" || return 1
+    _dc_file="$download_dir/$2.mp4"
+    if ! plausible_duration "$_dc_file"; then
+        printf "\33[2K\r\033[1;31m  discarded episode %s: runtime %ss is out of line with this show (wrong cut or partial download)\033[0m\n" \
+            "$2" "$(_duration "$_dc_file")" >&2
+        rm -f "$_dc_file"
+        return 1
+    fi
+}
+
 play_episode() {
     [ "$log_episode" = 1 ] && [ "$player_function" != "download" ] && command -v logger >/dev/null && logger -t ani-cli "${anime_title} ${ep_no}"
     [ -z "$video_link" ] && get_video_link
@@ -635,7 +676,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
                 filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                 download_dir="$show_dir"
-                if download "$video_link" "$filename"; then
+                if download_checked "$video_link" "$filename"; then
                     last="$ep_no"
                     printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                     set_watermark "$al_id" "$ep_no"
@@ -731,7 +772,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
                     filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                     download_dir="$show_dir"
-                    if download "$video_link" "$filename"; then
+                    if download_checked "$video_link" "$filename"; then
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                         set_watermark "$al_id" "$ep_no"
