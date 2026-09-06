@@ -11,8 +11,9 @@ AniList (WATCHING list)
 ani-cli --sync
         │
         ├─▶ ani-cli-allanime.py ──▶ AllAnime     (dead since 2026-08; kept for episode lists)
-        ├─▶ ani-cli-animehub.py ──▶ animehub     (primary source today)
-        └─▶ ani-cli-anidb.py    ──▶ anidb.app    (covers what animehub lacks)
+        ├─▶ ani-cli-animehub.py ──▶ animehub     (fast, per-season numbering)
+        ├─▶ ani-cli-anikoto.py  ──▶ anikoto.cz   (widest current-season catalogue)
+        └─▶ ani-cli-anidb.py    ──▶ anidb.app    (absolute numbering, translated)
         │
         ▼
 jellyfin_consolidator.py  ──▶  Canonical/Season NN/Show - SNNENN.ext
@@ -36,6 +37,7 @@ from its provider registry, which broke it. See "Running it with Jenkins".
 | `jellyfin_consolidator.py` | Renames/moves downloaded files into `Canonical/Season NN/Canonical - SNNENN.ext`, using `aliases.yaml` (title → canonical folder) and `seasons.yaml` (folder → forced season override) if present. |
 | `ani-cli-allanime.py` | Helper: wraps `anipy_api`'s `AllAnimeProvider` as a 3-verb CLI (`search` / `episodes` / `video`) reusing anipy-api's AES-GCM signed-request crypto rather than reimplementing it in shell. AllAnime is dead for video; still consulted for episode lists. |
 | `ani-cli-animehub.py` | Helper: same 3-verb CLI for `animehub`, anipy-api's own AllAnime replacement. Currently the primary source. Numbers episodes per-season from 1, like AniList. |
+| `ani-cli-anikoto.py` | Helper: same 3-verb CLI for `anikoto.cz`. Widest current-season catalogue - it carried BLEACH TYBW "The Calamity" when no other provider had it. Endpoints mirror [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), which is actively maintained against this site. |
 | `ani-cli-anidb.py` | Helper: same 3-verb CLI, scraping `anidb.app` instead. Used only when AllAnime itself returns an error (captcha, crypto/token rejection, etc). Uses `curl_cffi` (browser TLS impersonation) since anidb.app sits behind Cloudflare. |
 | `anime-sync-tui.py` | Optional standalone TUI: setup, status, run, schedule. Nothing else depends on it. |
 | `summary_text.py` | Formats a run's `summary.json` (or `fallback_summary.json`) into human-readable text, for logs and Telegram notifications. |
@@ -126,9 +128,10 @@ no flags for the usual fzf search → pick episode → mpv flow.
 |---|---|---|
 | `ANIPY_CONFIG` | `~/.config/anipy-cli/config.yaml` | Where the AniList token lives |
 | `ANIME_ROOT` | *(none - set this)* | Library root (both `--sync` and the consolidator) |
-| `ANI_CLI_ALLANIME_HELPER` | `~/scripts/ani-cli-allanime.py` | Path to the AllAnime helper |
-| `ANI_CLI_ANIDB_HELPER` | `~/scripts/ani-cli-anidb.py` | Path to the anidb.app helper |
-| `ANI_CLI_ANIMEHUB_HELPER` | `~/scripts/ani-cli-animehub.py` | Path to the animehub helper |
+| `ANI_CLI_ALLANIME_HELPER` | *(next to `ani-cli`)* | Path to the AllAnime helper |
+| `ANI_CLI_ANIDB_HELPER` | *(next to `ani-cli`)* | Path to the anidb.app helper |
+| `ANI_CLI_ANIMEHUB_HELPER` | *(next to `ani-cli`)* | Path to the animehub helper |
+| `ANI_CLI_ANIKOTO_HELPER` | *(next to `ani-cli`)* | Path to the anikoto.cz helper |
 | `ANI_CLI_MAIN_WATCHLIST` | `~/scripts/anime-state/watchlist.json` | Shared state `anilist_sync.py` also reads/writes |
 | `ANI_CLI_CONSOLIDATOR` | `~/scripts/anime-sync/jellyfin_consolidator.py` | Consolidator script `--sync` runs at the end |
 | `ANI_CLI_SKIP_CONSOLIDATE` | `0` | Set to `1` to skip `--sync`'s own consolidator call (e.g. if something else runs it right after) |
