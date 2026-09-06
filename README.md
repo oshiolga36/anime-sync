@@ -1,50 +1,41 @@
 # anime-sync
 
 Pulls your AniList "Watching" list, downloads new episodes, and organizes
-them into a Jellyfin/Plex-friendly library layout. Includes a standalone
-fallback path that keeps working even when the main scraping backend
-(AllAnime) is rate-limited, captcha-gated, or otherwise down.
+them into a Jellyfin/Plex-friendly library layout. Streaming sources break
+often, so it tries several providers in turn rather than trusting any one.
 
 ```
 AniList (WATCHING list)
         │
         ▼
-anilist_sync.py  ──uses──▶ anipy_api ──▶ AllAnime
+ani-cli --sync
+        │
+        ├─▶ ani-cli-allanime.py ──▶ AllAnime     (dead since 2026-08; kept for episode lists)
+        ├─▶ ani-cli-animehub.py ──▶ animehub     (primary source today)
+        └─▶ ani-cli-anidb.py    ──▶ anidb.app    (covers what animehub lacks)
         │
         ▼
 jellyfin_consolidator.py  ──▶  Canonical/Season NN/Show - SNNENN.ext
 ```
 
-If the main path above fails (AllAnime captcha-gates you, or an upstream
-`anipy-api` release breaks), `ani-cli` steps in as a second, independent
-path against the same AniList account, and falls back to `anidb.app` if
-AllAnime itself is unreachable:
+Each provider is tried in order until one returns a stream, so a single
+site going down (or dying outright, as AllAnime did) doesn't stop the
+pipeline. Progress is tracked per AniList id, not per provider, so
+whichever source gets an episode, the others won't re-download it.
 
-```
-AniList (WATCHING list)
-        │
-        ▼
-ani-cli --sync ──uses──▶ ani-cli-allanime.py ──▶ AllAnime
-        │                        │
-        │                  (on failure)
-        │                        ▼
-        │                ani-cli-anidb.py ──▶ anidb.app
-        ▼
-jellyfin_consolidator.py
-```
-
-Both paths write into the same shared state (`watchlist.json`), so
-whichever one actually gets an episode down is the one that "wins" -
-the other one won't re-download it.
+`anilist_sync.py` was the original driver via `anipy-api`. It is still in
+the repo but **no longer wired in**: anipy-api 3.9.0 dropped `allanime`
+from its provider registry, which broke it. See "Running it with Jenkins".
 
 ## Components
 
 | File | Role |
 |---|---|
-| `anilist_sync.py` | Main path. Uses [`anipy-api`](https://github.com/sdaqo/anipy-cli) to pull your AniList WATCHING list and download new episodes via AllAnime. |
+| `ani-cli` | The sync driver. `--sync` pulls your WATCHING list and downloads new episodes, trying each provider in turn. Also works as a normal interactive ani-cli (fzf + mpv). |
+| `anilist_sync.py` | The original `anipy-api` driver. Kept for reference; **not wired in** (anipy-api 3.9.0 removed the `allanime` provider it resolves by name). |
 | `jellyfin_consolidator.py` | Renames/moves downloaded files into `Canonical/Season NN/Canonical - SNNENN.ext`, using `aliases.yaml` (title → canonical folder) and `seasons.yaml` (folder → forced season override) if present. |
-| `ani-cli` | Standalone fallback, modeled on [pystardust/ani-cli](https://github.com/pystardust/ani-cli)'s UX. Also works as a normal interactive `ani-cli` (search/play via fzf+mpv) independent of any of this. |
-| `ani-cli-allanime.py` | Helper: wraps `anipy_api`'s `AllAnimeProvider` as a 3-verb CLI (`search` / `episodes` / `video`) so `ani-cli` gets the exact same scraping mechanics as `anilist_sync.py` without reimplementing AllAnime's AES-GCM signed-request crypto in shell. |
+| `ani-cli-allanime.py` | Helper: wraps `anipy_api`'s `AllAnimeProvider` as a 3-verb CLI (`search` / `episodes` / `video`) reusing anipy-api's AES-GCM signed-request crypto rather than reimplementing it in shell. AllAnime is dead for video; still consulted for episode lists. |
+| `ani-cli-animehub.py` | Helper: same 3-verb CLI for `animehub`, anipy-api's own AllAnime replacement. Currently the primary source. Numbers episodes per-season from 1, like AniList. |
 | `ani-cli-anidb.py` | Helper: same 3-verb CLI, scraping `anidb.app` instead. Used only when AllAnime itself returns an error (captcha, crypto/token rejection, etc). Uses `curl_cffi` (browser TLS impersonation) since anidb.app sits behind Cloudflare. |
 | `anime-sync-tui.py` | Optional standalone TUI: setup, status, run, schedule. Nothing else depends on it. |
 | `summary_text.py` | Formats a run's `summary.json` (or `fallback_summary.json`) into human-readable text, for logs and Telegram notifications. |
@@ -53,13 +44,13 @@ the other one won't re-download it.
 ## Requirements
 
 - Python 3.10+
-- `pip install anipy-api anipy-cli rich pyyaml yt-dlp curl_cffi`
+- `pip install anipy-api rich pyyaml yt-dlp curl_cffi`
 - `ffmpeg` (yt-dlp uses it as a muxing fallback)
 - `fzf`, `mpv` - only needed for `ani-cli`'s interactive (non-`--sync`) mode
 
 ## Setup
 
-1. **AniList token.** `anilist_sync.py` and `ani-cli --sync` both need a
+1. **AniList token.** `ani-cli --sync` needs a
    config anipy-cli itself understands. Easiest path: run any `anipy-cli`
    command once and follow its login flow, or drop a token directly into
    `~/.config/anipy-cli/config.yaml`:
@@ -117,17 +108,13 @@ Nothing here requires Jenkins - it's just three scripts you can run by hand
 or from any scheduler (cron, systemd timer, etc).
 
 ```sh
-# main path
-python3 anilist_sync.py
-python3 jellyfin_consolidator.py
-
-# fallback path (standalone, no Jenkins) - same AniList account, same library
-./ani-cli --sync
+./ani-cli --sync          # pull WATCHING, download new episodes, consolidate
+python3 jellyfin_consolidator.py   # only needed if you skipped consolidation
 ```
 
 `ani-cli --sync` runs a full pass on its own: pulls WATCHING, downloads
-anything new (AllAnime first, anidb.app if AllAnime errors), and runs the
-consolidator itself when it's done. Useful as a cron job in its own right,
+anything new (trying each provider in turn), and runs the consolidator
+itself when it's done. Useful as a cron job in its own right,
 or as a manual "is the main pipeline actually stuck?" check.
 
 Interactive mode still works exactly like upstream ani-cli - run it with
@@ -141,6 +128,7 @@ no flags for the usual fzf search → pick episode → mpv flow.
 | `ANIME_ROOT` | *(none - set this)* | Library root (both `--sync` and the consolidator) |
 | `ANI_CLI_ALLANIME_HELPER` | `~/scripts/ani-cli-allanime.py` | Path to the AllAnime helper |
 | `ANI_CLI_ANIDB_HELPER` | `~/scripts/ani-cli-anidb.py` | Path to the anidb.app helper |
+| `ANI_CLI_ANIMEHUB_HELPER` | `~/scripts/ani-cli-animehub.py` | Path to the animehub helper |
 | `ANI_CLI_MAIN_WATCHLIST` | `~/scripts/anime-state/watchlist.json` | Shared state `anilist_sync.py` also reads/writes |
 | `ANI_CLI_CONSOLIDATOR` | `~/scripts/anime-sync/jellyfin_consolidator.py` | Consolidator script `--sync` runs at the end |
 | `ANI_CLI_SKIP_CONSOLIDATE` | `0` | Set to `1` to skip `--sync`'s own consolidator call (e.g. if something else runs it right after) |
@@ -152,28 +140,25 @@ no flags for the usual fzf search → pick episode → mpv flow.
 
 The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 
-- **Automatic fallback.** If the main `sync` stage hard-fails, or exits
-  clean but every show failed/mixed results came back (soft failure -
-  e.g. a captcha or a broken upstream release), the `fallback-sync` stage
-  runs `ani-cli --sync` automatically, no manual intervention.
-- **Telegram notifications**, including what the fallback actually grabbed
-  (not just "it ran").
-- **State reconciliation.** Both paths write to the same `watchlist.json`
-  (mounted outside the workspace so it survives workspace wipes), so a show
-  the fallback recovers won't get retried against a still-broken AllAnime on
-  the next scheduled run.
+- **Telegram notifications** saying what actually downloaded or failed.
+- **Alert suppression.** Scheduled runs stay quiet when nothing happened or
+  when the same shows fail the same way as last time; any *change* in what
+  is broken breaks through, and a manual run always answers.
+- **Durable state.** `watchlist.json` lives outside the workspace, so a
+  Jenkins workspace wipe doesn't make the next run re-download everything.
 
 ### Pipeline stages
 
-1. **deps** - installs/upgrades all Python deps into `$HOME/.local`.
-2. **sync** - runs `anilist_sync.py`. Graded `unstable` if any show came
-   back as an error rather than a hard pipeline failure (the script itself
-   always exits 0).
-3. **fallback-sync** *(conditional)* - runs only when `sync` failed or was
-   graded unstable. Runs `ani-cli --sync` against the same watchlist.
-4. **consolidate** - runs the Jellyfin consolidator once, regardless of how
-   the earlier stages went (so partially-downloaded episodes still get
-   organized).
+1. **deps** - installs the Python deps into `$HOME/.local`. `anipy-api` is
+   **pinned**: an unattended `--upgrade` here is what broke this job when
+   3.9.0 dropped the `allanime` provider.
+2. **sync** - runs `./ani-cli --sync`, writing `summary.json`. Graded
+   `unstable` if any show failed, since the script exits 0 either way.
+3. **consolidate** - runs the Jellyfin consolidator regardless of how sync
+   went, so partially-downloaded episodes still get organized.
+
+There is no separate fallback stage: provider fallback happens inside
+`ani-cli --sync` itself, so the same behaviour applies however you run it.
 
 ### Jenkins setup
 
@@ -218,26 +203,31 @@ The `Jenkinsfile` automates the whole thing on a 2-hour cron and adds:
 
 ## Known limitations
 
-- **Blind-search ceiling.** Both fallback paths (AllAnime and anidb) prefer
-  an already-known/trusted identifier from `watchlist.json`, but fall back
-  to a title search for shows the main pipeline hasn't mapped yet. A search
-  match isn't guaranteed to be the right show for very generic titles -
-  interactive use lets you pick from the list; unattended `--sync` takes the
-  best available match.
-- **anidb.app ranks by franchise popularity, not exact match** - a new/niche
-  show's title can land behind older same-name franchise entries in search
-  results. `ani-cli` prefers an exact (case-insensitive) title match over
-  "first result" for this reason, but an exact match isn't guaranteed to
-  exist if AniList and anidb.app disagree on the title text.
+- **Provider titles disagree with AniList.** Providers index shows under
+  romaji or differently-worded season names ("... Master Swordsman II" vs
+  "... Season 2"), and they rank search results by popularity, not
+  relevance - searching "Dara-san of the Reiwa Era" returns *Food Wars*
+  first. `ani-cli` therefore requires an exact title match, and accepts a
+  non-exact one **only when the search returned a single hit**. Anything
+  ambiguous is declined and logged rather than guessed at, because filing
+  someone else's episode under your show is worse than missing one. Add a
+  mapping to `anidb_aliases.yaml` (AniList title → provider title) to fix a
+  show that keeps being declined.
+- **Absolute episode numbering.** anidb sometimes numbers a sequel cour
+  across the whole series (BLEACH TYBW is 41-44, Re:ZERO S4 is 67-78) while
+  AniList restarts at 1. This is translated automatically, but only when the
+  title matched exactly and the episode list is contiguous - a gappy list is
+  declined instead of mis-mapped. animehub numbers per-season, so it is
+  unaffected.
 - **anidb.app sits behind Cloudflare.** `ani-cli-anidb.py` uses `curl_cffi`'s
   browser TLS impersonation to get through it; if anidb.app tightens its
   protection further, this may need revisiting.
-- Neither fallback path knows anything the other doesn't share via
-  `watchlist.json` - if you run `ani-cli --sync` completely detached from
-  the main pipeline's state file, you lose the "don't redownload what's
-  already there" guarantee across paths (each still tracks its own state
-  independently, so at worst you get a duplicate download that the
-  consolidator will resolve by keeping the larger file).
+- **`aliases.yaml` serves two masters.** The consolidator reads it as
+  folder → canonical, where collapsing "X Season 4" → "X" is correct. The
+  downloader reads it to pick a download folder, where that same mapping
+  destroys the only season signal the consolidator gets. `ani-cli` now
+  refuses an alias that strips a season the title had - but if you hand-edit
+  that file, check both consumers.
 
 ## Acknowledgments
 
