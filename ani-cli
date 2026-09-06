@@ -159,6 +159,44 @@ anidb_video() {
     python3 "$anidb_helper" video "$1" "$2" "$3"
 }
 
+# animehub - added 2026-09-06, tried before anidb. anipy-api's own AllAnime
+# replacement, so no new dependency. Numbers episodes per-season from 1 like
+# AniList, so it needs none of anidb's absolute-numbering translation. Covers
+# ~12 of 16 current shows; anidb still carries the rest, hence both.
+animehub_helper="${ANI_CLI_ANIMEHUB_HELPER:-$HOME/scripts/ani-cli-animehub.py}"
+
+animehub_search() {
+    python3 "$animehub_helper" search "$1"
+}
+
+animehub_episodes() {
+    python3 "$animehub_helper" episodes "$1" "$2"
+}
+
+animehub_video() {
+    python3 "$animehub_helper" video "$1" "$2" "$3"
+}
+
+# Pick one show out of a provider's "id \t name" search output.
+# $1 = search TSV, $2 = title we searched for.
+# Prints "<id>\t<exact>" (exact = 1|0), or nothing when it can't be sure.
+# Shared by every provider lookup - this rule was written three times over
+# and the subtle part must not drift: an exact title match is required to
+# trust the result, and a non-exact match is only accepted when the search
+# returned exactly ONE hit. Providers rank by popularity, not relevance, so
+# "first of many" is how you file someone else's episode under this show.
+pick_match() {
+    _pm_lower=$(printf "%s" "$2" | tr '[:upper:]' '[:lower:]')
+    _pm_id=$(printf "%s\n" "$1" | while IFS="	" read -r _i _n; do
+        [ "$(printf "%s" "$_n" | tr '[:upper:]' '[:lower:]')" = "$_pm_lower" ] && printf "%s\n" "$_i" && break
+    done)
+    if [ -n "$_pm_id" ]; then
+        printf "%s\t1\n" "$_pm_id"
+    elif [ "$(printf "%s\n" "$1" | grep -c .)" = 1 ]; then
+        printf "%s\t0\n" "$(printf "%s" "$1" | head -n 1 | cut -f 1)"
+    fi
+}
+
 # $1 id, $2 our episode number, $3 exact-title-match flag. Prints anidb's
 # number for that episode, or nothing if it can't map it confidently.
 anidb_episode_for() {
@@ -338,12 +376,26 @@ sanitize_name() {
 
 # resolve an AniList title (english or romaji) to the folder it already lives
 # in under $anime_root, via aliases.yaml. falls back to the sanitized title.
+# does this name carry a season/sequel marker?
+has_season_marker() {
+    printf "%s" "$1" | grep -qiE '(season[ _-]*[0-9]+|[0-9]+(st|nd|rd|th)[ _-]*season|\bS[0-9]{1,2}\b|\b(II|III|IV)\b)'
+}
+
 resolve_folder() {
     _title="$1"
     _alias_file="$anime_root/aliases.yaml"
     if [ -f "$_alias_file" ]; then
         _mapped=$(sed -nE "s|^\"?${_title}\"?:[[:space:]]*\"?([^\"]+)\"?[[:space:]]*\$|\1|p" "$_alias_file" | head -n 1)
-        [ -n "$_mapped" ] && printf "%s" "$_mapped" && return 0
+        # Never let an alias strip the season. aliases.yaml is shared with the
+        # consolidator, where mapping "X Season 4" -> "X" is exactly right (it
+        # is the folder->canonical map). Here it is not: the download folder
+        # name is the ONLY season signal the consolidator gets, so a collapsed
+        # alias makes it guess season 1. That filed Slime S4E21 as S01E21 on
+        # 2026-09-06 and overwrote the real season 1 episode.
+        if [ -n "$_mapped" ] && { ! has_season_marker "$_title" || has_season_marker "$_mapped"; }; then
+            printf "%s" "$_mapped"
+            return 0
+        fi
     fi
     sanitize_name "$_title"
 }
@@ -455,20 +507,15 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
         anidb_only=0
         if [ -z "$anime_id" ]; then
             _t=$(resolve_anidb_title "$al_title")
-            _l=$(anidb_search "$_t" 2>/dev/null)
-            _tl=$(printf "%s" "$_t" | tr '[:upper:]' '[:lower:]')
-            _i=$(printf "%s\n" "$_l" | while IFS="	" read -r _id _title; do
-                [ "$(printf "%s" "$_title" | tr '[:upper:]' '[:lower:]')" = "$_tl" ] && printf "%s\n" "$_id" && break
-            done)
-            # same "never guess between ambiguous hits" rule as the fallback
-            [ -z "$_i" ] && [ "$(printf "%s\n" "$_l" | grep -c .)" = 1 ] && _i=$(printf "%s" "$_l" | head -n 1 | cut -f 1)
-            if [ -n "$_i" ]; then
-                _n=$(anidb_episodes "$_i" sub 2>/dev/null | grep -c .)
-                if [ "$_n" -gt 0 ] 2>/dev/null; then
-                    anidb_only=1
-                    ep_list=$(seq 1 "$_n")
-                    info "  no allanime match; using anidb directly ($_n episodes)"
-                fi
+            # Ask animehub first, same order as the per-episode fallback below.
+            # Only the episode COUNT matters here - the fallback re-resolves the
+            # show itself per episode and picks whichever provider has it.
+            _n=$(animehub_episodes "$(pick_match "$(animehub_search "$_t" 2>/dev/null)" "$_t" | cut -f 1)" sub 2>/dev/null | grep -c .)
+            [ "$_n" -gt 0 ] 2>/dev/null || _n=$(anidb_episodes "$(pick_match "$(anidb_search "$_t" 2>/dev/null)" "$_t" | cut -f 1)" sub 2>/dev/null | grep -c .)
+            if [ "$_n" -gt 0 ] 2>/dev/null; then
+                anidb_only=1
+                ep_list=$(seq 1 "$_n")
+                info "  no allanime match; using fallback providers directly ($_n episodes)"
             fi
         fi
         if [ -z "$anime_id" ] && [ "$anidb_only" = 0 ]; then
@@ -561,83 +608,82 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     # pattern is the anidb_only path, where there is no
                     # allanime id to have asked in the first place.
                     *"unknown error"* | *"no allanime match"*)
-                        _anidb_err=$(mktemp)
-                        _anidb_title=$(resolve_anidb_title "$al_title")
-                        anidb_list=$(anidb_search "$_anidb_title" 2>>"$_anidb_err")
-                        # anidb ranks by franchise popularity, not exact match -
-                        # a title search for a new/niche show can bury the
-                        # actual hit under older same-name entries (e.g. "THE
-                        # GHOST IN THE SHELL" (2026) landing last behind a
-                        # dozen unrelated Ghost in the Shell franchise results).
-                        # Prefer an exact (case-insensitive) title match; only
-                        # fall back to "first result" when nothing matches.
-                        _al_lower=$(printf "%s" "$_anidb_title" | tr '[:upper:]' '[:lower:]')
-                        anidb_id=$(printf "%s\n" "$anidb_list" | while IFS="	" read -r _id _title; do
-                            [ "$(printf "%s" "$_title" | tr '[:upper:]' '[:lower:]')" = "$_al_lower" ] && printf "%s\n" "$_id" && break
-                        done)
-                        if [ -n "$anidb_id" ]; then
-                            anidb_exact=1
-                        else
-                            # No exact match. "First result" is only safe when
-                            # the search was UNAMBIGUOUS - one hit, so there is
-                            # nothing else it could have meant (AniList and
-                            # anidb often disagree on season wording: "...
-                            # Master Swordsman II" vs "... Season 2"). With
-                            # several hits the top one is just anidb's
-                            # popularity ranking: searching "Dara-san of the
-                            # Reiwa Era" returns Food Wars first, and taking it
-                            # would file someone else's episode under this show.
-                            anidb_exact=0
-                            _hits=$(printf "%s\n" "$anidb_list" | grep -c .)
-                            if [ "$_hits" = 1 ]; then
-                                anidb_id=$(printf "%s" "$anidb_list" | head -n 1 | cut -f 1)
-                            else
-                                anidb_id=""
-                                # Say which of the three it actually is. "0 hits"
-                                # was reported as a matching problem during a
-                                # site outage until the helper learned to fail
-                                # loudly on non-200 - don't re-introduce that.
-                                if [ -s "$_anidb_err" ]; then
-                                    printf "\33[2K\r\033[1;33m  anidb unreachable: %s\033[0m\n" "$(sed -n 's/^error: //p' "$_anidb_err" | tail -1)" >&2
+                        _fb_err=$(mktemp)
+
+                        # animehub first: it numbers episodes per-season from 1
+                        # like AniList (no translation step), and unlike anidb
+                        # it is currently up. Its ids/titles are romaji, so the
+                        # same alias file feeds both.
+                        _fb_title=$(resolve_anidb_title "$al_title")
+                        _ah_hit=$(pick_match "$(animehub_search "$_fb_title" 2>>"$_fb_err")" "$_fb_title")
+                        if [ -n "$_ah_hit" ]; then
+                            _ah_id=$(printf "%s" "$_ah_hit" | cut -f 1)
+                            if animehub_episodes "$_ah_id" sub 2>>"$_fb_err" | grep -qx "$ep_no"; then
+                                anidb_links=$(animehub_video "$_ah_id" "$ep_no" sub 2>>"$_fb_err" | sort -g -r -s)
+                                [ -n "$anidb_links" ] && _fb_src="animehub"
+                            fi
+                        fi
+
+                        # anidb second, for the shows animehub doesn't carry
+                        # (Re:ZERO S4, Bumpkin II, BLEACH "The Calamity").
+                        if [ -z "$anidb_links" ]; then
+                            _anidb_title="$_fb_title"
+                            anidb_list=$(anidb_search "$_anidb_title" 2>>"$_fb_err")
+                            _ad_hit=$(pick_match "$anidb_list" "$_anidb_title")
+                            anidb_id=$(printf "%s" "$_ad_hit" | cut -f 1)
+                            anidb_exact=$(printf "%s" "$_ad_hit" | cut -s -f 2)
+                            [ -z "$anidb_exact" ] && anidb_exact=0
+                            if [ -z "$anidb_id" ]; then
+                                # Say which of the three this actually is. "0 hits"
+                                # got reported as a matching problem during a site
+                                # outage until the helper learned to fail loudly
+                                # on non-200 - don't re-introduce that.
+                                _hits=$(printf "%s\n" "$anidb_list" | grep -c .)
+                                if [ -s "$_fb_err" ]; then
+                                    printf "\33[2K\r\033[1;33m  fallback providers unreachable: %s\033[0m\n" "$(sed -n 's/^error: //p' "$_fb_err" | tail -1)" >&2
                                 elif [ "$_hits" = 0 ]; then
-                                    printf "\33[2K\r\033[1;33m  anidb has no entry for '%s'\033[0m\n" "$_anidb_title" >&2
+                                    printf "\33[2K\r\033[1;33m  no provider has an entry for '%s'\033[0m\n" "$_anidb_title" >&2
                                 else
                                     printf "\33[2K\r\033[1;33m  anidb: no exact title match and %s ambiguous hits, not guessing (add an anidb_aliases.yaml entry)\033[0m\n" "$_hits" >&2
                                 fi
+                            else
+                                # anidb may number a sequel cour absolutely across
+                                # the whole series (BLEACH TYBW = 41-44, Re:ZERO S4
+                                # = 67-78) while AniList restarts at 1, so a literal
+                                # grep for "$ep_no" finds nothing and we'd decline a
+                                # show anidb actually has. episode-for translates
+                                # it, returning empty rather than guessing.
+                                _anidb_ep=$(anidb_episode_for "$anidb_id" "$ep_no" "$anidb_exact" 2>>"$_fb_err")
+                                if [ -n "$_anidb_ep" ]; then
+                                    [ "$_anidb_ep" != "$ep_no" ] && info "  anidb numbers this cour absolutely: episode $ep_no is $_anidb_ep there"
+                                    anidb_links=$(anidb_video "$anidb_id" "$_anidb_ep" sub 2>>"$_fb_err" | sort -g -r -s)
+                                    [ -n "$anidb_links" ] && _fb_src="anidb.app"
+                                fi
                             fi
                         fi
-                        # anidb may number a sequel cour absolutely across the
-                        # whole series (BLEACH TYBW = 41-44, Re:ZERO S4 = 67-78)
-                        # while AniList restarts at 1, so a literal grep for
-                        # "$ep_no" finds nothing and the fallback declines a
-                        # show anidb actually has. episode-for translates it,
-                        # and returns empty rather than guess - see map_episode.
-                        if [ -n "$anidb_id" ]; then
-                            _anidb_ep=$(anidb_episode_for "$anidb_id" "$ep_no" "$anidb_exact" 2>>"$_anidb_err")
-                            if [ -n "$_anidb_ep" ]; then
-                                [ "$_anidb_ep" != "$ep_no" ] && info "  anidb numbers this cour absolutely: episode $ep_no is $_anidb_ep there"
-                                anidb_links=$(anidb_video "$anidb_id" "$_anidb_ep" sub 2>>"$_anidb_err" | sort -g -r -s)
-                            fi
+
+                        # Swallowing this would make "no provider has this show"
+                        # and "the helper itself is broken" look identical - the
+                        # exact bug already fixed twice on other paths.
+                        if [ -z "$anidb_links" ] && [ -s "$_fb_err" ]; then
+                            printf "\33[2K\r\033[1;33m  fallback also failed: %s\033[0m\n" "$(tail -1 "$_fb_err")" >&2
                         fi
-                        # Swallowing this would make "anidb has no match" and
-                        # "anidb helper itself is broken" look identical - the
-                        # exact bug already fixed once for the allanime path.
-                        if [ -z "$anidb_links" ] && [ -s "$_anidb_err" ]; then
-                            printf "\33[2K\r\033[1;33m  anidb fallback also failed: %s\033[0m\n" "$(tail -1 "$_anidb_err")" >&2
-                        fi
-                        rm -f "$_anidb_err"
+                        rm -f "$_fb_err"
                         ;;
                 esac
 
                 if [ -n "$anidb_links" ]; then
                     if [ "$anidb_only" = 1 ]; then
-                        info "  got episode $ep_no from anidb.app"
+                        info "  got episode $ep_no from $_fb_src"
                     else
-                        info "  AllAnime down ($_reason), got episode $ep_no from anidb.app instead"
+                        info "  AllAnime down ($_reason), got episode $ep_no from $_fb_src instead"
                     fi
                     _top=$(printf "%s" "$anidb_links" | head -n 1)
                     video_link=$(printf "%s" "$_top" | cut -d ">" -f 2)
-                    video_referrer=""
+                    # animehub serves HLS disguised as image/jpeg and 403s
+                    # without a Referer; anidb needs none and sends an empty
+                    # third field, so this covers both.
+                    video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
                     filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                     download_dir="$show_dir"
                     if download "$video_link" "$filename"; then
