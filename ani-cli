@@ -117,6 +117,15 @@ cleanup() {
 
 # SCRAPING
 #
+# Helper scripts live next to this one, in every install (repo checkout,
+# ~/scripts, Jenkins workspace). Defaulting to the script's own directory
+# instead of a hardcoded $HOME path means a caller that forgets to export
+# ANI_CLI_*_HELPER still works. That mistake silently disabled a whole
+# provider twice - the default pointed at a path that did not exist in the
+# Jenkins container, python3 failed, and the provider just looked absent.
+_self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || _self_dir="."
+
+#
 # AllAnime backend - same site + same GraphQL/AES-signed API that
 # /home/tolga/scripts/anime-sync/anilist_sync.py uses via anipy_api. Search
 # and episode-list are plain persisted-query POSTs, but get_video needs a
@@ -124,7 +133,7 @@ cleanup() {
 # (see anipy_api's allanime_provider.py). That crypto already exists,
 # correct and tested, in anipy_api - shelling out to it beats re-deriving
 # AES-GCM in POSIX sh. allanime_helper wraps it as a 3-verb CLI.
-allanime_helper="${ANI_CLI_ALLANIME_HELPER:-$HOME/scripts/ani-cli-allanime.py}"
+allanime_helper="${ANI_CLI_ALLANIME_HELPER:-$_self_dir/ani-cli-allanime.py}"
 
 # search the query and give results. format is (id \t name)
 allanime_search() {
@@ -145,7 +154,7 @@ allanime_video() {
 # (NEED_CAPTCHA / AA_CRYPTO_STALE). Different site, different id space -
 # always blind-searched by title, never trusted the way a watchlist-sourced
 # allanime id is (see trusted_id below), so it never writes to main_watchlist.
-anidb_helper="${ANI_CLI_ANIDB_HELPER:-$HOME/scripts/ani-cli-anidb.py}"
+anidb_helper="${ANI_CLI_ANIDB_HELPER:-$_self_dir/ani-cli-anidb.py}"
 
 anidb_search() {
     python3 "$anidb_helper" search "$1"
@@ -163,7 +172,7 @@ anidb_video() {
 # replacement, so no new dependency. Numbers episodes per-season from 1 like
 # AniList, so it needs none of anidb's absolute-numbering translation. Covers
 # ~12 of 16 current shows; anidb still carries the rest, hence both.
-animehub_helper="${ANI_CLI_ANIMEHUB_HELPER:-$HOME/scripts/ani-cli-animehub.py}"
+animehub_helper="${ANI_CLI_ANIMEHUB_HELPER:-$_self_dir/ani-cli-animehub.py}"
 
 animehub_search() {
     python3 "$animehub_helper" search "$1"

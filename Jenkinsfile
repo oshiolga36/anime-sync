@@ -112,6 +112,7 @@ pipeline {
                         [ -f "$STATE/watchlist.json" ] && cp "$STATE/watchlist.json" watchlist.json
                         PATH="$HOME/.local/bin:$PATH" \
                         ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
+                        ANI_CLI_ANIMEHUB_HELPER="$(pwd)/ani-cli-animehub.py" \
                         ANI_CLI_ANIDB_HELPER="$(pwd)/ani-cli-anidb.py" \
                         ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
                         ANI_CLI_FALLBACK_SUMMARY="$(pwd)/summary.json" \
