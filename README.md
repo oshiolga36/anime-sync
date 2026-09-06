@@ -46,6 +46,7 @@ the other one won't re-download it.
 | `ani-cli` | Standalone fallback, modeled on [pystardust/ani-cli](https://github.com/pystardust/ani-cli)'s UX. Also works as a normal interactive `ani-cli` (search/play via fzf+mpv) independent of any of this. |
 | `ani-cli-allanime.py` | Helper: wraps `anipy_api`'s `AllAnimeProvider` as a 3-verb CLI (`search` / `episodes` / `video`) so `ani-cli` gets the exact same scraping mechanics as `anilist_sync.py` without reimplementing AllAnime's AES-GCM signed-request crypto in shell. |
 | `ani-cli-anidb.py` | Helper: same 3-verb CLI, scraping `anidb.app` instead. Used only when AllAnime itself returns an error (captcha, crypto/token rejection, etc). Uses `curl_cffi` (browser TLS impersonation) since anidb.app sits behind Cloudflare. |
+| `anime-sync-tui.py` | Optional standalone TUI: setup, status, run, schedule. Nothing else depends on it. |
 | `summary_text.py` | Formats a run's `summary.json` (or `fallback_summary.json`) into human-readable text, for logs and Telegram notifications. |
 | `Jenkinsfile` | Runs the whole thing on a schedule, with fallback automation and Telegram alerts (see below). |
 
@@ -79,6 +80,36 @@ the other one won't re-download it.
    - `seasons.yaml` - forces a season number for folders the consolidator's
      regex-based guesser gets wrong (common with Japanese season markers
      like "San no Shou" or "2-nensei-hen").
+
+## Quick start (interactive)
+
+If you don't want to hand-edit configs or write a crontab, run the TUI:
+
+```sh
+./anime-sync-tui.py
+```
+
+It's a standalone control panel - the Jenkins pipeline and the cron path
+don't know it exists, so using it is entirely optional. It offers:
+
+```
+  1  Check setup          dependency + config + path check, tells you what's missing
+  2  Configure            library root and AniList token (writes anipy-cli's config)
+  3  Sync now             runs a full pass with live output
+  4  Sync now, no consolidate
+  5  Library status       per-show: what the pipeline thinks it has vs files on disk
+  6  Schedule (cron)      shows the cron line, optionally installs it
+```
+
+Start with **1** - it names the exact `pip install` for anything absent. It
+degrades to plain text when `rich` isn't installed yet, since it's the tool
+you run *before* installing dependencies. Its own settings live in
+`~/.config/anime-sync/tui.json`; the AniList token goes to the same
+`~/.config/anipy-cli/config.yaml` everything else reads.
+
+In the status view, `~N` means the count is for the whole franchise folder
+(the consolidator merges seasons) and `?` means the folder wasn't found -
+neither is reported as `0`, so a healthy show never looks empty.
 
 ## Running it without Jenkins
 
