@@ -28,6 +28,7 @@ Usage:
     ani-cli-anikoto.py search <query>                 -> id\\tname per line
     ani-cli-anikoto.py episodes <id> <sub|dub>        -> episode number per line
     ani-cli-anikoto.py video <id> <episode> <sub|dub> -> "<res>p >url>referrer" per line
+    ani-cli-anikoto.py subs  <id> <episode> <sub|dub> -> "<lang>\turl\treferer" per track
 """
 import html as _html
 import re
@@ -102,25 +103,20 @@ def cmd_episodes(slug: str, _lang: str) -> None:
         print(num)
 
 
-def cmd_video(slug: str, episode: str, lang: str) -> None:
-    s = _session()
+def _sources(s, slug: str, episode: str, lang: str):
+    """(sources_json, embed_origin) for one episode, trying each server."""
     tok = next((t for n, t in _episodes(s, slug) if n == str(episode) or n == str(episode).lstrip("0")), None)
     if tok is None:
         raise RuntimeError(f"episode {episode} not found")
 
     servers = _result(_get(s, f"{BASE}/ajax/server/list", params={"servers": tok}).json(), "server list")
-    # the markup lists sub and dub blocks; take only the requested one
     want = "dub" if lang == "dub" else "sub"
-    block = re.split(r'data-type="', servers)
-    chosen = next((b for b in block if b.startswith(want)), None)
+    chosen = next((b for b in re.split(r'data-type="', servers) if b.startswith(want)), None)
     if chosen is None:
         raise RuntimeError(f"no {want} servers for episode {episode}")
-    tokens = re.findall(r'data-link-id="([^"]+)"', chosen)
-    if not tokens:
-        raise RuntimeError(f"no server tokens for episode {episode}")
 
     last = None
-    for st in tokens:
+    for st in re.findall(r'data-link-id="([^"]+)"', chosen):
         try:
             res = _get(s, f"{BASE}/ajax/server", params={"get": st}).json().get("result") or {}
             embed = res.get("url")
@@ -133,24 +129,54 @@ def cmd_video(slug: str, episode: str, lang: str) -> None:
                 continue
             data = _get(s, f"{origin}/stream/getSources", params={"id": m.group(1)},
                         headers={"Referer": origin + "/"}).json()
-            master = (data.get("sources") or {}).get("file")
-            if not master:
-                continue
-            # master playlist itself needs the referer, hence fetching it here
-            pl = _get(s, master, headers={"Referer": origin + "/"}).text
-            base = master.rsplit("/", 1)[0]
-            out = []
-            for res_line, path in re.findall(r'RESOLUTION=\d+x(\d+)[^\n]*\n([^\n#]+)', pl):
-                url = path if path.startswith("http") else f"{base}/{path.strip()}"
-                out.append((int(res_line), url))
-            if not out:  # single-variant playlist
-                out = [(0, master)]
-            for height, url in sorted(out, reverse=True):
-                print(f"{height}p >{url}>{origin}/")
-            return
-        except Exception as e:  # try the next server rather than giving up
+            # Accept a response carrying EITHER a playable source or subtitle
+            # tracks. As of 2026-09-06 this host returns an encrypted "enc"
+            # blob instead of a plaintext "sources" URL, but "tracks" stayed
+            # in the clear - so subtitles still work even while video does not.
+            if (data.get("sources") or {}).get("file") or data.get("tracks"):
+                return data, origin
+        except Exception as e:
             last = e
     raise RuntimeError(f"no playable server for episode {episode}" + (f" ({last})" if last else ""))
+
+
+def cmd_subs(slug: str, episode: str, lang: str) -> None:
+    """Emit "<lang>\t<url>\t<referer>" per external subtitle track. These streams carry no
+    embedded subtitle stream at all - the player is expected to overlay these
+    - so without them a downloaded episode has no subtitles whatsoever."""
+    data, origin = _sources(_session(), slug, episode, lang)
+    for tr in data.get("tracks") or []:
+        if (tr.get("kind") or "").lower() not in ("captions", "subtitles"):
+            continue  # skip thumbnail/preview tracks
+        url = tr.get("file")
+        if not url:
+            continue
+        label = (tr.get("label") or "und").strip()
+        code = {"english": "en", "german": "de", "spanish": "es", "french": "fr",
+                "italian": "it", "portuguese": "pt", "russian": "ru",
+                "japanese": "ja", "arabic": "ar"}.get(label.lower(), label.lower()[:3])
+        # the subtitle CDN 403s without a Referer, exactly like the video one
+        print(f"{code}\t{url}\t{origin}/")
+
+
+def cmd_video(slug: str, episode: str, lang: str) -> None:
+    s = _session()
+    data, origin = _sources(s, slug, episode, lang)
+    master = (data.get("sources") or {}).get("file")
+    if not master:
+        raise RuntimeError(
+            "anikoto returned encrypted sources (no plaintext m3u8); "
+            "video unavailable from this provider" if data.get("enc")
+            else "anikoto returned no video source")
+    # the master playlist itself needs the referer, hence fetching it here
+    pl = _get(s, master, headers={"Referer": origin + "/"}).text
+    base = master.rsplit("/", 1)[0]
+    out = [(int(h), u if u.startswith("http") else f"{base}/{u.strip()}")
+           for h, u in re.findall(r'RESOLUTION=\d+x(\d+)[^\n]*\n([^\n#]+)', pl)]
+    if not out:  # single-variant playlist
+        out = [(0, master)]
+    for height, url in sorted(out, reverse=True):
+        print(f"{height}p >{url}>{origin}/")
 
 
 def demo() -> None:
@@ -181,6 +207,8 @@ if __name__ == "__main__":
             cmd_episodes(args[0], args[1])
         elif cmd == "video" and len(args) == 3:
             cmd_video(args[0], args[1], args[2])
+        elif cmd == "subs" and len(args) == 3:
+            cmd_subs(args[0], args[1], args[2])
         else:
             sys.exit("bad arguments")
     except Exception as e:

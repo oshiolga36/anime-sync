@@ -204,6 +204,11 @@ anikoto_video() {
     python3 "$anikoto_helper" video "$1" "$2" "$3"
 }
 
+# "<lang>\t<url>" per external subtitle track
+anikoto_subs() {
+    python3 "$anikoto_helper" subs "$1" "$2" "$3"
+}
+
 # Pick shows out of a provider's "id \t name" search output.
 # $1 = search TSV, $2 = title we searched for.
 # The rule that must not drift: an exact title match is required to trust a
@@ -345,6 +350,33 @@ plausible_duration() {
     awk -v n="$_pd_new" -v r="$_pd_ref" 'BEGIN{exit !(n >= r*0.5)}'
 }
 
+# These streams carry NO embedded subtitle track - the site expects the
+# player to overlay a separate .vtt - so a downloaded episode has no
+# subtitles at all unless we fetch them too. Saved next to the video as
+# "<name>.<lang>.vtt", which is what the consolidator pairs with the
+# episode and what Jellyfin picks up. Best-effort: a show with hardsubbed
+# video or a provider without tracks simply gets nothing, never an error.
+# $1 = title, $2 = episode, $3 = filename stem the video was saved under.
+fetch_subs() {
+    [ "${ANI_CLI_SUBS:-1}" = 1 ] || return 0
+    _fs_lang="${ANI_CLI_SUB_LANG:-en}"
+    _fs_cands=$(pick_match "$(anikoto_search "$1" 2>/dev/null)" "$1")
+    [ -z "$_fs_cands" ] && return 0
+    _fs_id=$(printf "%s\n" "$_fs_cands" | head -n 1 | cut -f 1)
+    _fs_line=$(anikoto_subs "$_fs_id" "$2" sub 2>/dev/null | awk -v l="$_fs_lang" '$1==l {print; exit}')
+    [ -z "$_fs_line" ] && return 0
+    _fs_url=$(printf "%s" "$_fs_line" | cut -f 2)
+    _fs_ref=$(printf "%s" "$_fs_line" | cut -f 3)
+    [ -z "$_fs_url" ] && return 0
+    _fs_out="$download_dir/$3.$_fs_lang.vtt"
+    # the subtitle CDN 403s without a Referer, same as the video CDN
+    if curl -sfL --max-time 60 ${_fs_ref:+-H "Referer: $_fs_ref"} -o "$_fs_out" "$_fs_url" && [ -s "$_fs_out" ]; then
+        info "  fetched $_fs_lang subtitles"
+    else
+        rm -f "$_fs_out"
+    fi
+}
+
 # download + sanity check. Used by --sync only; the interactive path streams
 # to a player and has a human watching it.
 download_checked() {
@@ -356,6 +388,8 @@ download_checked() {
         rm -f "$_dc_file"
         return 1
     fi
+    # subtitles are per-episode, so fetch them only once the video is kept
+    [ -n "$_dc_title" ] && fetch_subs "$_dc_title" "$_dc_ep" "$2"
 }
 
 play_episode() {
@@ -657,6 +691,10 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         show_dir="$anime_root/$folder"
         mkdir -p "$show_dir"
 
+        # resolved once per show: used for subtitle lookup on the AllAnime
+        # success path too, which runs before the fallback block would set it
+        _fb_title=$(resolve_anidb_title "$al_title")
+
         _attempted=0
         for ep_no in $ep_list; do
             awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue
@@ -676,6 +714,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
                 filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                 download_dir="$show_dir"
+                _dc_title="$_fb_title"; _dc_ep="$ep_no"
                 if download_checked "$video_link" "$filename"; then
                     last="$ep_no"
                     printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
@@ -723,7 +762,6 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # only then fuzzy single-hit matches. Provider order
                         # alone must not let a loose match on one site outrank
                         # an exact one on another.
-                        _fb_title=$(resolve_anidb_title "$al_title")
                         for _pass in 1 0; do
                             for _prov in animehub anikoto anidb; do
                                 anidb_links=$(provider_links "$_prov" "$_fb_title" "$ep_no" "$_pass")
@@ -772,7 +810,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     video_referrer=$(printf "%s" "$_top" | cut -s -d ">" -f 3)
                     filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                     download_dir="$show_dir"
-                    if download_checked "$video_link" "$filename"; then
+                    _dc_title="$_fb_title"; _dc_ep="$ep_no"
+                if download_checked "$video_link" "$filename"; then
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                         set_watermark "$al_id" "$ep_no"

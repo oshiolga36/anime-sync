@@ -75,8 +75,11 @@ def consolidate():
     aliases = load_aliases()
     seasons = load_seasons()
 
-    # Files to ignore/delete
-    junk_exts = {'.nfo', '.txt', '.url', '.jpg', '.png'}
+    # Files to delete outright. Deliberately NOT .nfo/.jpg/.png: in an
+    # organised library those are Jellyfin's own metadata and artwork, and
+    # deleting them every run silently destroys work the media server did.
+    # Everything not video/subtitle is now left exactly where it is.
+    junk_exts = {'.txt', '.url'}
     
     for item in os.listdir(ROOT):
         full_path = os.path.join(ROOT, item)
@@ -102,6 +105,12 @@ def consolidate():
                 is_video = ext in {'.mp4', '.mkv', '.avi', '.mov'}
                 is_sub   = ext in {'.vtt', '.srt', '.ass', '.ssa'}
                 if not (is_video or is_sub):
+                    # .nfo / artwork / anything else: leave exactly where it
+                    # is. Renaming them is not safe - parse_season_and_ep
+                    # defaults to E01 rather than failing, so a series-level
+                    # tvshow.nfo would be rewritten as "Show - S01E01.nfo" and
+                    # clobber real episode metadata. Nothing we download emits
+                    # these files, so there is nothing to relocate either.
                     continue
 
                 # Season: forced override wins, else folder/file context.
