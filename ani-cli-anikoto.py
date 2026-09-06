@@ -151,10 +151,17 @@ def cmd_subs(slug: str, episode: str, lang: str) -> None:
         url = tr.get("file")
         if not url:
             continue
-        label = (tr.get("label") or "und").strip()
-        code = {"english": "en", "german": "de", "spanish": "es", "french": "fr",
-                "italian": "it", "portuguese": "pt", "russian": "ru",
-                "japanese": "ja", "arabic": "ar"}.get(label.lower(), label.lower()[:3])
+        # Labels are inconsistent between episodes of the same show - one says
+        # "English", the next "eng" - so normalise both full names and ISO
+        # 639-2 codes down to the 2-letter code callers ask for.
+        label = (tr.get("label") or "und").strip().lower()
+        names = {"english": "en", "german": "de", "spanish": "es", "french": "fr",
+                 "italian": "it", "portuguese": "pt", "russian": "ru",
+                 "japanese": "ja", "arabic": "ar"}
+        iso3 = {"eng": "en", "ger": "de", "deu": "de", "spa": "es", "fre": "fr",
+                "fra": "fr", "ita": "it", "por": "pt", "rus": "ru", "jpn": "ja",
+                "ara": "ar"}
+        code = names.get(label) or iso3.get(label[:3]) or label[:3]
         # the subtitle CDN 403s without a Referer, exactly like the video one
         print(f"{code}\t{url}\t{origin}/")
 
