@@ -209,6 +209,24 @@ anikoto_subs() {
     python3 "$anikoto_helper" subs "$1" "$2" "$3"
 }
 
+# animeheaven.me - fifth provider, added 2026-09-14. Simplest of the lot:
+# plain progressive MP4s, no HLS or encryption. Added when the other four
+# simultaneously could not serve five shows (AllAnime dead, anidb 503 for a
+# week, animehub never carried them, anikoto's host went encrypted).
+animeheaven_helper="${ANI_CLI_ANIMEHEAVEN_HELPER:-$_self_dir/ani-cli-animeheaven.py}"
+
+animeheaven_search() {
+    python3 "$animeheaven_helper" search "$1"
+}
+
+animeheaven_episodes() {
+    python3 "$animeheaven_helper" episodes "$1" "$2"
+}
+
+animeheaven_video() {
+    python3 "$animeheaven_helper" video "$1" "$2" "$3"
+}
+
 # Pick shows out of a provider's "id \t name" search output.
 # $1 = search TSV, $2 = title we searched for.
 # The rule that must not drift: an exact title match is required to trust a
@@ -237,7 +255,8 @@ pick_match() {
 # be a copy of this logic per provider; adding anikoto as a fourth would have
 # meant a third copy.
 provider_links() {
-    _pl_prov="$1"; _pl_title="$2"; _pl_ep="$3"; _pl_want_exact="${4:-0}"
+    _pl_prov="$1"; _pl_ep="$3"; _pl_want_exact="${4:-0}"
+    _pl_title=$(resolve_provider_title "$_pl_prov" "$2")
     _pl_cands=$(pick_match "$("${_pl_prov}_search" "$_pl_title" 2>>"$_fb_err")" "$_pl_title")
     [ -z "$_pl_cands" ] && return 1
     printf "%s\n" "$_pl_cands" | while IFS="	" read -r _pl_id _pl_exact; do
@@ -544,14 +563,46 @@ resolve_folder() {
 # a show anidb actually has. anidb_aliases.yaml maps AniList title -> anidb
 # title; same file format and parsing as aliases.yaml above.
 resolve_anidb_title() {
-    _title="$1"
-    _alias_file="$anime_root/anidb_aliases.yaml"
-    if [ -f "$_alias_file" ]; then
-        _mapped=$(sed -nE "s|^\"?${_title}\"?:[[:space:]]*\"?([^\"]+)\"?[[:space:]]*\$|\1|p" "$_alias_file" | head -n 1)
-        [ -n "$_mapped" ] && printf "%s" "$_mapped" && return 0
-    fi
-    printf "%s" "$_title"
+    _rat_m=$(alias_lookup "$1")
+    [ -n "$_rat_m" ] && printf "%s" "$_rat_m" && return 0
+    printf "%s" "$1"
 }
+
+# One lookup in anidb_aliases.yaml. Exact string match via awk rather than a
+# sed expression: both keys and values here contain ':' (Re:ZERO) and the
+# per-provider keys contain '|', so every sed delimiter collides with real
+# data. Tries each ':' in turn as the key/value split.
+alias_lookup() {
+    _al_file="$anime_root/anidb_aliases.yaml"
+    [ -f "$_al_file" ] || return 0
+    awk -v want="$1" '
+        /^[[:space:]]*#/ { next }
+        {
+            pos = index($0, ":")
+            while (pos > 0) {
+                key = substr($0, 1, pos - 1)
+                val = substr($0, pos + 1)
+                gsub(/^[ \t"]+/, "", key); gsub(/[ \t"]+$/, "", key)
+                gsub(/^[ \t"]+/, "", val); gsub(/[ \t"]+$/, "", val)
+                if (key == want && val != "") { print val; exit }
+                nxt = index(substr($0, pos + 1), ":")
+                if (nxt == 0) break
+                pos = pos + nxt
+            }
+        }' "$_al_file"
+}
+
+# Providers name the same show differently enough that one shared alias cannot
+# serve them all: animeheaven calls it "Saga of Tanya the Evil II", anidb
+# agrees, but aliasing Re:ZERO to animeheaven's punctuation would break the
+# exact match anidb already had. So a per-provider override wins over the
+# shared one - key it as "<provider>|<AniList title>" in anidb_aliases.yaml.
+resolve_provider_title() {
+    _rpt_m=$(alias_lookup "$1|$2")
+    [ -n "$_rpt_m" ] && printf "%s" "$_rpt_m" && return 0
+    resolve_anidb_title "$2"
+}
+
 
 sync_mode() {
     dep_ch python3
@@ -648,8 +699,12 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             # Ask animehub first, same order as the per-episode fallback below.
             # Only the episode COUNT matters here - the fallback re-resolves the
             # show itself per episode and picks whichever provider has it.
-            _n=$(animehub_episodes "$(pick_match "$(animehub_search "$_t" 2>/dev/null)" "$_t" | cut -f 1)" sub 2>/dev/null | grep -c .)
-            [ "$_n" -gt 0 ] 2>/dev/null || _n=$(anidb_episodes "$(pick_match "$(anidb_search "$_t" 2>/dev/null)" "$_t" | cut -f 1)" sub 2>/dev/null | grep -c .)
+            _n=0
+            for _p in animehub anikoto animeheaven anidb; do
+                _pt=$(resolve_provider_title "$_p" "$al_title")
+                _n=$("${_p}_episodes" "$(pick_match "$("${_p}_search" "$_pt" 2>/dev/null)" "$_pt" | cut -f 1)" sub 2>/dev/null | grep -c .)
+                [ "$_n" -gt 0 ] 2>/dev/null && break
+            done
             if [ "$_n" -gt 0 ] 2>/dev/null; then
                 anidb_only=1
                 ep_list=$(seq 1 "$_n")
@@ -763,8 +818,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # alone must not let a loose match on one site outrank
                         # an exact one on another.
                         for _pass in 1 0; do
-                            for _prov in animehub anikoto anidb; do
-                                anidb_links=$(provider_links "$_prov" "$_fb_title" "$ep_no" "$_pass")
+                            for _prov in animehub anikoto animeheaven anidb; do
+                                anidb_links=$(provider_links "$_prov" "$al_title" "$ep_no" "$_pass")
                                 if [ -n "$anidb_links" ]; then
                                     _fb_src="$_prov"
                                     break
