@@ -62,7 +62,14 @@ def parse_season_and_ep(name):
     s = match_s.group(1).zfill(2) if match_s else "01"
     
     # Look for Episode number (e.g., _08 or - E08)
-    match_e = re.search(r'[_-] (\d+)\b|E(\d+)\b|(?<!\d)(\d{1,3})\.(?:mp4|mkv|avi)', name, re.IGNORECASE)
+    # The trailing-number form must also match subtitle names, which carry an
+    # optional language tag: "Show_10.mp4" and "Show_10.en.vtt" are the same
+    # episode. Without the sub extensions here every fetched subtitle fell
+    # through to the "01" default and was filed as episode 1, overwriting the
+    # real episode 1 subtitle.
+    match_e = re.search(
+        r'[_-] (\d+)\b|E(\d+)\b|(?<!\d)(\d{1,3})(?:\.[a-z]{2,3})?\.(?:mp4|mkv|avi|mov|vtt|srt|ass|ssa)',
+        name, re.IGNORECASE)
     if match_e:
         e = next(g for g in match_e.groups() if g is not None).zfill(2)
     else:
