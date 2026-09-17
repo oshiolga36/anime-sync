@@ -145,6 +145,7 @@ def cmd_subs(slug: str, episode: str, lang: str) -> None:
     embedded subtitle stream at all - the player is expected to overlay these
     - so without them a downloaded episode has no subtitles whatsoever."""
     data, origin = _sources(_session(), slug, episode, lang)
+    out = []
     for tr in data.get("tracks") or []:
         if (tr.get("kind") or "").lower() not in ("captions", "subtitles"):
             continue  # skip thumbnail/preview tracks
@@ -162,6 +163,14 @@ def cmd_subs(slug: str, episode: str, lang: str) -> None:
                 "fra": "fr", "ita": "it", "por": "pt", "rus": "ru", "jpn": "ja",
                 "ara": "ar"}
         code = names.get(label) or iso3.get(label[:3]) or label[:3]
+        # A "forced" track carries only signs and on-screen text, not dialogue -
+        # 23 cues against 328 for the real one. It is often listed FIRST, so a
+        # caller taking the first match for a language gets subtitles that look
+        # present but contain no speech. Rank those last.
+        forced = "forced" in f"{label} {url}".lower()
+        out.append((forced, code, url))
+    # stable sort: full tracks before forced ones, order otherwise preserved
+    for forced, code, url in sorted(out, key=lambda r: r[0]):
         # the subtitle CDN 403s without a Referer, exactly like the video one
         print(f"{code}\t{url}\t{origin}/")
 

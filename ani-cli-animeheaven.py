@@ -61,7 +61,10 @@ def _episodes(s, aid: str):
     """[(episode_number, key)] for one show, as listed (newest first)."""
     page = _get(s, f"{BASE}/anime.php?{aid}").text
     pairs = re.findall(
-        r'gatea\("([0-9a-f]{32})"\)[\s\S]{0,400}?watch2[^>]*>\s*([0-9.]+)\s*<', page
+        # markup is inconsistent between show pages: some write gatea("key"),
+    # others gatea( "key") with a space. Requiring no space silently produced
+    # zero episodes for those shows, which reads as "provider lacks the show".
+    r'gatea\(\s*"([0-9a-f]{32})"\s*\)[\s\S]{0,400}?watch2[^>]*>\s*([0-9.]+)\s*<', page
     )
     return [(num, key) for key, num in pairs]
 
@@ -93,11 +96,15 @@ def cmd_video(aid: str, episode: str, _lang: str) -> None:
 
 def demo() -> None:
     # no network: the two parses that silently yield "nothing" if they drift
-    pairs = re.findall(
-        r'gatea\("([0-9a-f]{32})"\)[\s\S]{0,400}?watch2[^>]*>\s*([0-9.]+)\s*<',
-        '''<a onclick='gatea("a0acfc85571bd150a4dd117180b0071f")'><div class='watch2 bc '>8</div></a>'''
-    )
-    assert pairs == [("a0acfc85571bd150a4dd117180b0071f", "8")], pairs
+    rx = r'gatea\(\s*"([0-9a-f]{32})"\s*\)[\s\S]{0,400}?watch2[^>]*>\s*([0-9.]+)\s*<'
+    for markup, want in (
+        ("""<a onclick='gatea("a0acfc85571bd150a4dd117180b0071f")'><div class='watch2 bc '>8</div></a>""",
+         [("a0acfc85571bd150a4dd117180b0071f", "8")]),
+        # the spaced variant, which silently matched nothing before
+        ("""<a onclick='gatea( "63813ff6a43deb149031dc4497e25bec")'><div class= ' watch2 bc ' >11</div></a>""",
+         [("63813ff6a43deb149031dc4497e25bec", "11")]),
+    ):
+        assert re.findall(rx, markup) == want, markup
     hits = re.findall(r"href='anime\.php\?([^']+)'[^>]*class='c'>([^<]+)<",
                       """<a href='anime.php?07v8r' class='c'>Bleach: TYBW</a>""")
     assert hits == [("07v8r", "Bleach: TYBW")], hits
