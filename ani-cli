@@ -227,6 +227,25 @@ animeheaven_video() {
     python3 "$animeheaven_helper" video "$1" "$2" "$3"
 }
 
+# animegg.org - sixth provider, added 2026-10-16. Progressive MP4s with real
+# quality labels, no HLS or encryption. Added when every other provider had
+# failed for a set of shows at once (anidb shut down, anikoto encrypted,
+# animeheaven serving 3-second placeholders, animehub lacking the titles) -
+# animegg had all of them.
+animegg_helper="${ANI_CLI_ANIMEGG_HELPER:-$_self_dir/ani-cli-animegg.py}"
+
+animegg_search() {
+    python3 "$animegg_helper" search "$1"
+}
+
+animegg_episodes() {
+    python3 "$animegg_helper" episodes "$1" "$2"
+}
+
+animegg_video() {
+    python3 "$animegg_helper" video "$1" "$2" "$3"
+}
+
 # Pick shows out of a provider's "id \t name" search output.
 # $1 = search TSV, $2 = title we searched for.
 # The rule that must not drift: an exact title match is required to trust a
@@ -719,7 +738,7 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             # Only the episode COUNT matters here - the fallback re-resolves the
             # show itself per episode and picks whichever provider has it.
             _n=0
-            for _p in animehub anikoto animeheaven anidb; do
+            for _p in animehub animegg anikoto animeheaven anidb; do
                 _pt=$(resolve_provider_title "$_p" "$al_title")
                 _n=$("${_p}_episodes" "$(pick_match "$("${_p}_search" "$_pt" 2>/dev/null)" "$_pt" | cut -f 1)" sub 2>/dev/null | grep -c .)
                 [ "$_n" -gt 0 ] 2>/dev/null && break
@@ -837,7 +856,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # alone must not let a loose match on one site outrank
                         # an exact one on another.
                         for _pass in 1 0; do
-                            for _prov in animehub anikoto animeheaven anidb; do
+                            for _prov in animehub animegg anikoto animeheaven anidb; do
                                 anidb_links=$(provider_links "$_prov" "$al_title" "$ep_no" "$_pass")
                                 if [ -n "$anidb_links" ]; then
                                     _fb_src="$_prov"
