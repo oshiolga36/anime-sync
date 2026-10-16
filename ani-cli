@@ -246,6 +246,71 @@ animegg_video() {
     python3 "$animegg_helper" video "$1" "$2" "$3"
 }
 
+# PROVIDER HEALTH
+#
+# Which providers are actually working, tracked across runs. Sites in this
+# space die without warning - AllAnime's keygen froze, anidb.app shut down
+# behind a six-week "503", anikoto's host switched to encrypted sources,
+# animeheaven started serving 3-second placeholders - and a dead provider
+# that is still in the rotation costs a failed network round trip per
+# episode, every run, forever. This retires them on its own.
+provider_health="${ANI_CLI_PROVIDER_HEALTH:-${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/provider_health.json}"
+
+# How long a provider may go without a single success before it is retired.
+provider_dead_days="${ANI_CLI_PROVIDER_DEAD_DAYS:-60}"
+
+# $1 provider, $2 ok|fail. Records the outcome against the current time.
+provider_record() {
+    mkdir -p "$(dirname "$provider_health")" 2>/dev/null
+    python3 -c "
+import json, os, sys, time
+path, prov, outcome = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+e = d.setdefault(prov, {})
+now = int(time.time())
+e['last_try'] = now
+if outcome == 'ok':
+    e['ok'] = e.get('ok', 0) + 1
+    e['last_ok'] = now
+    e.pop('first_fail', None)   # a success resets the dead clock
+else:
+    e['fail'] = e.get('fail', 0) + 1
+    e.setdefault('first_fail', now)
+tmp = path + '.tmp'
+json.dump(d, open(tmp, 'w'), indent=2)
+os.replace(tmp, path)
+" "$provider_health" "$1" "$2" 2>/dev/null
+}
+
+# $1 provider. Exit 0 = try it, 1 = retired, skip it this run.
+# Dead means: no success for $provider_dead_days, measured from the last
+# success (or from the first failure if it never worked at all). A retired
+# provider is still re-probed once a day, so a site that comes back rejoins
+# on its own - retirement must not be a one-way door, because sites here do
+# return (and the whole point is surviving churn, not pruning once).
+provider_enabled() {
+    [ -f "$provider_health" ] || return 0
+    python3 -c "
+import json, sys, time
+path, prov, dead_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    e = json.load(open(path)).get(prov) or {}
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(0)
+now = time.time()
+since = e.get('last_ok') or e.get('first_fail')
+if since is None:
+    sys.exit(0)                                   # nothing recorded yet
+if (now - since) / 86400 < dead_days:
+    sys.exit(0)                                   # still within the window
+last_try = e.get('last_try') or 0
+sys.exit(0 if (now - last_try) > 86400 else 1)    # retired: daily re-probe
+" "$provider_health" "$1" "$provider_dead_days" 2>/dev/null
+}
+
 # Pick shows out of a provider's "id \t name" search output.
 # $1 = search TSV, $2 = title we searched for.
 # The rule that must not drift: an exact title match is required to trust a
@@ -381,6 +446,12 @@ plausible_duration() {
     command -v ffprobe >/dev/null 2>&1 || return 0
     _pd_new=$(_duration "$1")
     [ -z "$_pd_new" ] && return 1          # unreadable = broken, reject
+
+    # A file can be the right length and still be unplayable. Require an
+    # actual video stream: a stray HTML error page, an audio-only mirror or a
+    # truncated container all probe as "a file" but have nothing to watch.
+    ffprobe -v error -select_streams v -show_entries stream=codec_type \
+        -of csv=p=0 "$1" 2>/dev/null | grep -q video || return 1
 
     # Absolute floor, checked BEFORE any sibling comparison. The sibling test
     # is blind in two common cases - a brand new show has nothing to compare
@@ -641,6 +712,46 @@ resolve_provider_title() {
     resolve_anidb_title "$2"
 }
 
+
+# ani-cli --providers: the health table, so provider state is inspectable
+# rather than inferred from build logs.
+provider_status() {
+    printf "%s\n" "provider health: $provider_health"
+    printf "retire after %s days without a success (ANI_CLI_PROVIDER_DEAD_DAYS)\n\n" "$provider_dead_days"
+    python3 -c "
+import json, sys, time
+path, dead = sys.argv[1], int(sys.argv[2])
+try:
+    d = json.load(open(path))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+known = ['animehub', 'animegg', 'anikoto', 'animeheaven', 'anidb']
+now = time.time()
+def ago(ts):
+    if not ts: return 'never'
+    days = (now - ts) / 86400
+    return 'today' if days < 1 else '%dd ago' % days
+print('%-13s %-8s %-8s %-12s %s' % ('provider', 'ok', 'fail', 'last ok', 'state'))
+for name in known + [k for k in d if k not in known]:
+    e = d.get(name) or {}
+    since = e.get('last_ok') or e.get('first_fail')
+    dead_for = (now - since) / 86400 if since else 0
+    last_ok, first_fail = e.get('last_ok'), e.get('first_fail')
+    # 'healthy' means the MOST RECENT outcome was a success. A provider that
+    # worked in September and has failed ever since is failing, not healthy -
+    # labelling it by its last success is how a dead provider looks fine.
+    if not e:
+        state = 'untested'
+    elif first_fail is None or (last_ok or 0) >= first_fail:
+        state = 'healthy'
+    elif dead_for >= dead:
+        state = 'RETIRED (%dd dry)' % dead_for
+    else:
+        state = 'failing (%dd, retires in %dd)' % (dead_for, dead - dead_for)
+    print('%-13s %-8s %-8s %-12s %s' % (name, e.get('ok', 0), e.get('fail', 0), ago(e.get('last_ok')), state))
+" "$provider_health" "$provider_dead_days"
+    exit 0
+}
 
 sync_mode() {
     dep_ch python3
@@ -904,7 +1015,12 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     filename="${folder}_$(printf '%02d' "$ep_no" 2>/dev/null || printf '%s' "$ep_no")"
                     download_dir="$show_dir"
                     _dc_title="$_fb_title"; _dc_ep="$ep_no"
-                if download_checked "$video_link" "$filename"; then
+                    if download_checked "$video_link" "$filename"; then
+                        # The credibility verdict IS the provider's score: a
+                        # provider that hands back 3-second placeholders has
+                        # not "worked" just because a URL resolved. That is
+                        # what makes retirement trustworthy.
+                        provider_record "$_fb_src" ok
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                         set_watermark "$al_id" "$ep_no"
@@ -918,6 +1034,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # confident enough to be the right show.
                         [ "$anidb_exact" = 1 ] && bump_main_watchlist "$al_id" "$ep_no"
                         continue
+                    else
+                        provider_record "$_fb_src" fail
                     fi
                 fi
 
@@ -1029,6 +1147,7 @@ while [ $# -gt 0 ]; do
         --rofi) menu_program=rofi ;;
         --dmenu) menu_program=dmenu ;;
         --sync) source=sync ;;
+        --providers) source=providers ;;
         *) query="$(printf "%s" "$query $1" | sed 's|^ ||')" ;;
     esac
     shift
@@ -1062,6 +1181,7 @@ trap 'cleanup; exit 1' INT HUP TERM
 # searching
 case "$source" in
     sync) sync_mode ;;
+    providers) provider_status ;;
     history)
         anime_list=$(while read -r ep_no anime_id anime_title; do
             ep_list=$(allanime_episodes "$anime_id" "$mode")
