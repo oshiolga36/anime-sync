@@ -362,8 +362,27 @@ plausible_duration() {
     command -v ffprobe >/dev/null 2>&1 || return 0
     _pd_new=$(_duration "$1")
     [ -z "$_pd_new" ] && return 1          # unreadable = broken, reject
-    _pd_ref=$(find "${show_dir:-$download_dir}" -name '*.mp4' ! -name "$(basename "$1")" 2>/dev/null |
-        head -n 5 | while IFS= read -r _pd_f; do _duration "$_pd_f"; done |
+
+    # Absolute floor, checked BEFORE any sibling comparison. The sibling test
+    # is blind in two common cases - a brand new show has nothing to compare
+    # against, and a season-suffixed download folder ("X Season 2") does not
+    # contain the episodes the consolidator already filed under "X/Season 02"
+    # - so on 2026-10-15 animeheaven started serving 3-second 0.1MiB
+    # placeholders for every show and seven of them were installed as real
+    # episodes. No anime episode is two minutes long, including shorts, so
+    # this rejects that class outright no matter what else is known.
+    [ "$_pd_new" -lt "${ANI_CLI_MIN_SECONDS:-120}" ] 2>/dev/null && return 1
+
+    # Siblings: the show's own download folder, plus the canonical folder the
+    # consolidator moves episodes into once a season suffix is stripped.
+    _pd_dirs="${show_dir:-$download_dir}"
+    _pd_canon=$(printf "%s" "${folder:-}" | sed -E 's/[ _-]*(Season[ _-]*[0-9]+|S[0-9]{1,2}|[0-9]+(st|nd|rd|th)[ _-]*Season|II|III|IV)$//I')
+    [ -n "$_pd_canon" ] && [ "$_pd_canon" != "${folder:-}" ] && [ -d "$anime_root/$_pd_canon" ] &&
+        _pd_dirs="$_pd_dirs
+$anime_root/$_pd_canon"
+    _pd_ref=$(printf "%s\n" "$_pd_dirs" | while IFS= read -r _pd_d; do
+            [ -n "$_pd_d" ] && find "$_pd_d" -name '*.mp4' ! -name "$(basename "$1")" 2>/dev/null
+        done | head -n 5 | while IFS= read -r _pd_f; do _duration "$_pd_f"; done |
         sort -n | awk '{a[NR]=$1} END{if (NR) print a[int((NR+1)/2)]}')
     [ -z "$_pd_ref" ] || [ "$_pd_ref" -lt 1 ] 2>/dev/null && return 0
     awk -v n="$_pd_new" -v r="$_pd_ref" 'BEGIN{exit !(n >= r*0.5)}'
