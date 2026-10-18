@@ -35,10 +35,16 @@ from curl_cffi import requests
 
 BASE = "https://9anime.org.lv"
 
-# Stream hosts we can actually read, best first. megaplay.buzz is excluded on
-# purpose: it returns an encrypted blob, so preferring it would make this
-# provider look broken while a working server sat further down the list.
-USABLE_HOSTS = ("vidmoly.biz", "vidmoly.to")
+# Stream hosts we can actually read. megaplay.buzz is excluded on purpose: it
+# returns an encrypted blob, so preferring it would make this provider look
+# broken while a working server sat further down the list.
+#
+# Matched as a domain PREFIX, not an exact host: vidmoly rotates its TLD and
+# a fixed list of (.biz, .to) silently rejected vidmoly.org, so two episodes
+# reported "only encrypted servers offered" while a working server was sitting
+# right there in the list. An allowlist that is too narrow fails exactly like
+# a provider outage, which is the hardest kind of bug to see.
+USABLE_HOSTS = ("vidmoly.",)
 
 
 def _session() -> requests.Session:
@@ -166,8 +172,12 @@ def demo() -> None:
     enc = base64.b64encode(b'<iframe src="https://vidmoly.biz/embed-x.html">').decode()
     got = re.findall(r'<option[^>]*value="([A-Za-z0-9+/=]{20,})"', f'<option value="{enc}">Omega<')
     assert got == [enc], got
-    assert any(h in base64.b64decode(got[0] + "===").decode() for h in USABLE_HOSTS)
-    assert "megaplay.buzz" not in USABLE_HOSTS
+    # every vidmoly TLD must pass - a fixed (.biz,.to) list rejected .org and
+    # looked identical to the site having no usable server at all
+    for host in ("vidmoly.biz", "vidmoly.to", "vidmoly.org", "vidmoly.net"):
+        assert any(h in f"https://{host}/embed-x.html" for h in USABLE_HOSTS), host
+    # and the encrypted host must still lose
+    assert not any(h in "https://megaplay.buzz/stream/x" for h in USABLE_HOSTS)
 
     variants = re.findall(r'RESOLUTION=\d+x(\d+)[^\n]*\n([^\n#]+)',
                           '#EXT-X-STREAM-INF:RESOLUTION=1600x900\nhttps://x/index.m3u8\n')
