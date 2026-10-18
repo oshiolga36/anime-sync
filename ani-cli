@@ -311,6 +311,27 @@ sys.exit(0 if (now - last_try) > 86400 else 1)    # retired: daily re-probe
 " "$provider_health" "$1" "$provider_dead_days" 2>/dev/null
 }
 
+# 9anime - seventh provider, added 2026-10-18 for NEW-EPISODE latency
+# rather than coverage. animegg is reliable for back catalogue but lags on
+# fresh releases (and for some episodes carries only a dubbed player), so the
+# newest episode kept falling through to animeheaven's placeholders. 9anime
+# publishes within about a day and uses English titles, so it exact-matches.
+# Placed after animegg: prefer the proven provider, fall here for what it
+# does not have yet.
+nineanime_helper="${ANI_CLI_NINEANIME_HELPER:-$_self_dir/ani-cli-nineanime.py}"
+
+nineanime_search() {
+    python3 "$nineanime_helper" search "$1"
+}
+
+nineanime_episodes() {
+    python3 "$nineanime_helper" episodes "$1" "$2"
+}
+
+nineanime_video() {
+    python3 "$nineanime_helper" video "$1" "$2" "$3"
+}
+
 # Pick shows out of a provider's "id \t name" search output.
 # $1 = search TSV, $2 = title we searched for.
 # The rule that must not drift: an exact title match is required to trust a
@@ -725,7 +746,7 @@ try:
     d = json.load(open(path))
 except (FileNotFoundError, json.JSONDecodeError):
     d = {}
-known = ['animehub', 'animegg', 'anikoto', 'animeheaven', 'anidb']
+known = ['animehub', 'animegg', 'nineanime', 'anikoto', 'animeheaven', 'anidb']
 now = time.time()
 def ago(ts):
     if not ts: return 'never'
@@ -849,7 +870,7 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             # Only the episode COUNT matters here - the fallback re-resolves the
             # show itself per episode and picks whichever provider has it.
             _n=0
-            for _p in animehub animegg anikoto animeheaven anidb; do
+            for _p in animehub animegg nineanime anikoto animeheaven anidb; do
                 _pt=$(resolve_provider_title "$_p" "$al_title")
                 _n=$("${_p}_episodes" "$(pick_match "$("${_p}_search" "$_pt" 2>/dev/null)" "$_pt" | cut -f 1)" sub 2>/dev/null | grep -c .)
                 [ "$_n" -gt 0 ] 2>/dev/null && break
@@ -967,7 +988,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # alone must not let a loose match on one site outrank
                         # an exact one on another.
                         for _pass in 1 0; do
-                            for _prov in animehub animegg anikoto animeheaven anidb; do
+                            for _prov in animehub animegg nineanime anikoto animeheaven anidb; do
                                 anidb_links=$(provider_links "$_prov" "$al_title" "$ep_no" "$_pass")
                                 if [ -n "$anidb_links" ]; then
                                     _fb_src="$_prov"
