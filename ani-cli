@@ -343,15 +343,42 @@ nineanime_video() {
 # Calamity" twice, one with all 7 episodes and one with a single stub - so
 # returning only the first would fail a show the provider actually has,
 # depending on nothing but search order. Callers try candidates in turn.
+# Fold the punctuation sites disagree on, so an exact match stays exact.
+# AniList writes "Blood War - The Calamity" with a hyphen; 9anime writes it
+# with an en dash. That one character defeated the exact match, left two
+# fuzzy hits, and the only alternative on offer was the MOVIE entry of the
+# same name - i.e. the near-miss was a different work, not a near-copy.
+# Folds: en/em dash and the various unicode hyphens to "-", curly quotes to
+# straight, collapses whitespace, drops a leading article, lowercases.
+title_key() {
+    printf "%s" "$1" | sed -e 's/[—–‒―]/-/g' -e "s/[’‘]/'/g" -e 's/[“”]/"/g' \
+        -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' |
+        tr '[:upper:]' '[:lower:]'
+}
+
 pick_match() {
-    _pm_lower=$(printf "%s" "$2" | tr '[:upper:]' '[:lower:]')
+    _pm_lower=$(title_key "$2")
     _pm_hits=$(printf "%s\n" "$1" | while IFS="	" read -r _i _n; do
-        [ -n "$_i" ] && [ "$(printf "%s" "$_n" | tr '[:upper:]' '[:lower:]')" = "$_pm_lower" ] && printf "%s\t1\n" "$_i"
+        [ -n "$_i" ] && [ "$(title_key "$_n")" = "$_pm_lower" ] && printf "%s\t1\n" "$_i"
     done)
     if [ -n "$_pm_hits" ]; then
         printf "%s\n" "$_pm_hits"
     elif [ "$(printf "%s\n" "$1" | grep -c .)" = 1 ]; then
-        printf "%s\t0\n" "$(printf "%s" "$1" | head -n 1 | cut -f 1)"
+        # Single hit, so there is nothing else it could have meant - but a
+        # lone "<wanted> Movie"/"OVA"/"Special" is a DIFFERENT work, not a
+        # near-spelling of the series. 9anime lists both a Calamity series
+        # and a Calamity Movie; accepting the movie as episode 1 of the show
+        # is exactly the wrong-content class this keeps tripping over.
+        _pm_one=$(printf "%s" "$1" | head -n 1)
+        _pm_name=$(title_key "$(printf "%s" "$_pm_one" | cut -f 2)")
+        case "$_pm_name" in
+            "$_pm_lower "*movie | "$_pm_lower "*ova | "$_pm_lower "*special | "$_pm_lower "*recap)
+                case "$_pm_lower" in
+                    *movie | *ova | *special | *recap) ;;   # we asked for one
+                    *) return 0 ;;                          # decline
+                esac ;;
+        esac
+        printf "%s\t0\n" "$(printf "%s" "$_pm_one" | cut -f 1)"
     fi
 }
 
