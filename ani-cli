@@ -246,6 +246,22 @@ animegg_video() {
     python3 "$animegg_helper" video "$1" "$2" "$3"
 }
 
+# Providers tried for VIDEO, in order. Retired 2026-10-24, with evidence:
+#
+#   anidb       search returns nothing at all - anidb.app shut down and now
+#               redirects to a static landing page. Not coming back.
+#   animeheaven serves 0.08MiB 3-second placeholders for every show since
+#               2026-10-15 (134 consecutive failures). Its search still
+#               works, which is exactly what made it dangerous: it looked
+#               alive and poisoned the fallback chain.
+#   anikoto     stream host went encrypted on 2026-09-06 and has not come
+#               back. NOT removed outright - its subtitle tracks are still
+#               plaintext and fetch_subs() depends on it, so it stays as the
+#               subtitle source while leaving the video rotation.
+#
+# Each helper is still on disk; add a name back here to re-enable it.
+providers="${ANI_CLI_PROVIDERS:-animehub animegg nineanime}"
+
 # PROVIDER HEALTH
 #
 # Which providers are actually working, tracked across runs. Sites in this
@@ -764,6 +780,7 @@ resolve_provider_title() {
 # ani-cli --providers: the health table, so provider state is inspectable
 # rather than inferred from build logs.
 provider_status() {
+    printf "%s\n" "video rotation: $providers"
     printf "%s\n" "provider health: $provider_health"
     printf "retire after %s days without a success (ANI_CLI_PROVIDER_DEAD_DAYS)\n\n" "$provider_dead_days"
     python3 -c "
@@ -773,14 +790,16 @@ try:
     d = json.load(open(path))
 except (FileNotFoundError, json.JSONDecodeError):
     d = {}
-known = ['animehub', 'animegg', 'nineanime', 'anikoto', 'animeheaven', 'anidb']
+known = sys.argv[3].split() if len(sys.argv) > 3 else []
+retired = [p for p in ['animehub','animegg','nineanime','anikoto','animeheaven','anidb']
+           if p not in known]
 now = time.time()
 def ago(ts):
     if not ts: return 'never'
     days = (now - ts) / 86400
     return 'today' if days < 1 else '%dd ago' % days
 print('%-13s %-8s %-8s %-12s %s' % ('provider', 'ok', 'fail', 'last ok', 'state'))
-for name in known + [k for k in d if k not in known]:
+for name in known + retired + [k for k in d if k not in known and k not in retired]:
     e = d.get(name) or {}
     since = e.get('last_ok') or e.get('first_fail')
     dead_for = (now - since) / 86400 if since else 0
@@ -796,8 +815,12 @@ for name in known + [k for k in d if k not in known]:
         state = 'RETIRED (%dd dry)' % dead_for
     else:
         state = 'failing (%dd, retires in %dd)' % (dead_for, dead - dead_for)
+    if name not in known:
+        # out of the rotation entirely - say so rather than showing a
+        # countdown for something that is no longer being tried
+        state = 'OUT OF ROTATION' + (' (subtitle source)' if name == 'anikoto' else '')
     print('%-13s %-8s %-8s %-12s %s' % (name, e.get('ok', 0), e.get('fail', 0), ago(e.get('last_ok')), state))
-" "$provider_health" "$provider_dead_days"
+" "$provider_health" "$provider_dead_days" "$providers"
     exit 0
 }
 
@@ -897,7 +920,7 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             # Only the episode COUNT matters here - the fallback re-resolves the
             # show itself per episode and picks whichever provider has it.
             _n=0
-            for _p in animehub animegg nineanime anikoto animeheaven anidb; do
+            for _p in $providers; do
                 _pt=$(resolve_provider_title "$_p" "$al_title")
                 _n=$("${_p}_episodes" "$(pick_match "$("${_p}_search" "$_pt" 2>/dev/null)" "$_pt" | cut -f 1)" sub 2>/dev/null | grep -c .)
                 [ "$_n" -gt 0 ] 2>/dev/null && break
@@ -1015,7 +1038,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         # alone must not let a loose match on one site outrank
                         # an exact one on another.
                         for _pass in 1 0; do
-                            for _prov in animehub animegg nineanime anikoto animeheaven anidb; do
+                            for _prov in $providers; do
                                 anidb_links=$(provider_links "$_prov" "$al_title" "$ep_no" "$_pass")
                                 if [ -n "$anidb_links" ]; then
                                     _fb_src="$_prov"
