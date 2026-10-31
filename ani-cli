@@ -1075,7 +1075,12 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         [ -n "$_gap_eps" ] && info "  retrying recorded gap(s): $_gap_eps"
 
         _attempted=0
+        _seen=""
         for ep_no in $_gap_eps $ep_list; do
+            # a gap episode is also in ep_list, so without this it is handled
+            # twice and reported twice ("skipped E05, E05")
+            case " $_seen " in *" $ep_no "*) continue ;; esac
+            _seen="$_seen $ep_no"
             case " $_gap_eps " in
                 *" $ep_no "*) _is_gap=1 ;;
                 *) _is_gap=0
