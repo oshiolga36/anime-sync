@@ -902,7 +902,14 @@ for name in known + retired + [k for k in d if k not in known and k not in retir
 # episode provably resolves, which an outage can never satisfy.
 # $1 al_title, $2 al_id, $3 ep, $4 reason. Exit 0 = continue, 1 = stop.
 handle_episode_failure() {
-    [ "$_is_gap" = 1 ] && return 0          # a known gap failing again: move on
+    if [ "$_is_gap" = 1 ]; then
+        # A known gap that still will not download. Re-report it every run:
+        # emitting nothing here made the gap vanish from the summary after
+        # the run that created it, so a skipped episode became invisible -
+        # precisely the silent-hole outcome this was built to avoid.
+        printf "gap\t%s\t%s\t%s\n" "$1" "$3" "$4" >>"$results_tmp"
+        return 0
+    fi
     _hf_n=$(gap_state "$2" "$3" fail)
     if [ "${_hf_n:-0}" -ge "$gap_after" ] 2>/dev/null && later_episode_exists "$1" "$3"; then
         gap_state "$2" "$3" record
