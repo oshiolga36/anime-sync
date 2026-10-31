@@ -30,8 +30,14 @@ def build(summary: dict) -> str:
 
     lines = []
     for s in shows[:MAX_SHOWS]:
+        if s.get("gaps") and s.get("status") == "downloaded":
+            g = ", ".join(f"E{e:02d}" for e in sorted(s["gaps"]))
+            lines.append(f"~ {s['title']}: skipped {g} (not published anywhere; retried each run)")
         if s.get("status") == "downloaded" and s.get("episodes"):
             lines.append(f"↓ {s['title']}: {fmt_eps(s['episodes'])}")
+        if s.get("status") == "gap":
+            g = ", ".join(f"E{e:02d}" for e in sorted(s["gaps"]))
+            lines.append(f"~ {s['title']}: skipped {g} (not published anywhere; retried each run)")
         if s.get("status") == "failed":
             lines.append(f"! {s['title']}: {s.get('detail', 'failed')}")
         elif s.get("errors"):
@@ -44,6 +50,8 @@ def build(summary: dict) -> str:
         lines.append("Nothing new — everything up to date.")
 
     tail = f"{stats.get('downloaded', 0)} downloaded, {stats.get('skipped', 0)} up to date"
+    if stats.get("gaps"):
+        tail += f", {stats['gaps']} skipped as gaps"
     if stats.get("failed"):
         tail += f", {stats['failed']} failed"
     if summary.get("anipy"):

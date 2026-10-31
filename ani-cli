@@ -262,6 +262,78 @@ animegg_video() {
 # Each helper is still on disk; add a name back here to re-enable it.
 providers="${ANI_CLI_PROVIDERS:-animehub animegg nineanime}"
 
+# EPISODE GAPS
+#
+# A provider's back catalogue can be missing one episode in the middle while
+# carrying everything after it - animegg lists Blue Box 1-8 then 15, 17, and
+# has no source for 5. The watermark is a single integer, so without this a
+# single hole stops the show forever: every run retries that episode, fails,
+# and never reaches 6-25.
+#
+# Skipping is deliberately hard to trigger, because "skip it" is also what a
+# provider outage looks like:
+#   - the episode must have failed on $gap_after separate runs, and
+#   - a LATER episode must actually resolve to a stream right now.
+# The second check is the important one: during an outage nothing resolves,
+# so nothing is ever written off. A recorded gap is retried on every
+# subsequent run and clears itself the moment a provider publishes it.
+gaps_file="${ANI_CLI_GAPS:-${hist_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}/episode_gaps.json}"
+gap_after="${ANI_CLI_GAP_AFTER:-3}"
+
+# $1 al_id -> space separated episode numbers recorded as gaps
+gaps_for() {
+    [ -f "$gaps_file" ] || return 0
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(0)
+print(' '.join((d.get(sys.argv[2]) or {}).get('gaps', {}).keys()))
+" "$gaps_file" "$1" 2>/dev/null
+}
+
+# $1 al_id, $2 ep, $3 record|clear|fail. 'fail' prints the new failure count.
+gap_state() {
+    mkdir -p "$(dirname "$gaps_file")" 2>/dev/null
+    python3 -c "
+import json, os, sys, time
+path, key, ep, action = sys.argv[1:5]
+try:
+    d = json.load(open(path))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+e = d.setdefault(key, {})
+fails = e.setdefault('fails', {})
+gaps = e.setdefault('gaps', {})
+if action == 'fail':
+    fails[ep] = fails.get(ep, 0) + 1
+    print(fails[ep])
+elif action == 'record':
+    gaps[ep] = {'since': int(time.time()), 'tries': fails.get(ep, 0)}
+elif action == 'clear':
+    fails.pop(ep, None)
+    gaps.pop(ep, None)
+tmp = path + '.tmp'
+json.dump(d, open(tmp, 'w'), indent=2)
+os.replace(tmp, path)
+" "$gaps_file" "$1" "$2" "$3" 2>/dev/null
+}
+
+# Is any episode after $2 actually obtainable right now? Proof that the hole
+# is specific to one episode rather than the provider being down.
+later_episode_exists() {
+    _le_after="$2"
+    for _le_ep in $ep_list; do
+        awk -v a="$_le_ep" -v b="$_le_after" 'BEGIN{exit !(a>b)}' || continue
+        for _le_p in $providers; do
+            [ -n "$(provider_links "$_le_p" "$1" "$_le_ep" 0 2>/dev/null)" ] && return 0
+        done
+        return 1   # check only the first later episode; cheap and decisive
+    done
+    return 1
+}
+
 # PROVIDER HEALTH
 #
 # Which providers are actually working, tracked across runs. Sites in this
@@ -824,6 +896,25 @@ for name in known + retired + [k for k in d if k not in known and k not in retir
     exit 0
 }
 
+# Decide what to do when an episode cannot be fetched. Default is the old
+# behaviour - stop this show - because stopping is safe. A gap is only
+# recorded once the episode has failed $gap_after separate runs AND a later
+# episode provably resolves, which an outage can never satisfy.
+# $1 al_title, $2 al_id, $3 ep, $4 reason. Exit 0 = continue, 1 = stop.
+handle_episode_failure() {
+    [ "$_is_gap" = 1 ] && return 0          # a known gap failing again: move on
+    _hf_n=$(gap_state "$2" "$3" fail)
+    if [ "${_hf_n:-0}" -ge "$gap_after" ] 2>/dev/null && later_episode_exists "$1" "$3"; then
+        gap_state "$2" "$3" record
+        printf "\33[2K\r\033[1;33m  episode %s unavailable after %s runs but later episodes are - recording a gap and continuing\033[0m\n" "$3" "$_hf_n" >&2
+        printf "gap\t%s\t%s\t%s\n" "$1" "$3" "$4" >>"$results_tmp"
+        return 0
+    fi
+    printf "\33[2K\r\033[1;33m  %s for episode %s, stopping this show here\033[0m\n" "$4" "$3" >&2
+    printf "failed\t%s\t%s\t%s\n" "$1" "$3" "$4" >>"$results_tmp"
+    return 1
+}
+
 sync_mode() {
     dep_ch python3
     dep_ch_failover "yt-dlp,ffmpeg" >/dev/null || die "Neither yt-dlp nor ffmpeg found"
@@ -970,9 +1061,19 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         # success path too, which runs before the fallback block would set it
         _fb_title=$(resolve_anidb_title "$al_title")
 
+        # Recorded gaps come first and bypass the watermark - they are by
+        # definition below it. A gap that now downloads clears itself, so a
+        # hole heals as soon as any provider publishes the episode.
+        _gap_eps=$(gaps_for "$al_id")
+        [ -n "$_gap_eps" ] && info "  retrying recorded gap(s): $_gap_eps"
+
         _attempted=0
-        for ep_no in $ep_list; do
-            awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue
+        for ep_no in $_gap_eps $ep_list; do
+            case " $_gap_eps " in
+                *" $ep_no "*) _is_gap=1 ;;
+                *) _is_gap=0
+                   awk -v a="$ep_no" -v b="$last" 'BEGIN{exit !(a>b)}' || continue ;;
+            esac
             _attempted=1
             info "  downloading episode $ep_no"
             _err_file=$(mktemp)
@@ -993,6 +1094,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 if download_checked "$video_link" "$filename"; then
                     last="$ep_no"
                     printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
+                    gap_state "$al_id" "$ep_no" clear
                     set_watermark "$al_id" "$ep_no"
                     # Only safe to advance the shared watchlist when anime_id
                     # came from it in the first place (trusted_id=1) - a
@@ -1000,9 +1102,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     # writing that back would poison anilist_sync.py's state.
                     [ "$trusted_id" = 1 ] && bump_main_watchlist "$al_id" "$ep_no"
                 else
-                    printf "\33[2K\r\033[1;31m  download failed for episode %s, stopping this show here\033[0m\n" "$ep_no" >&2
-                    printf "failed\t%s\t%s\tdownload failed\n" "$al_title" "$ep_no" >>"$results_tmp"
-                    break
+                    handle_episode_failure "$al_title" "$al_id" "$ep_no" "download failed" || break
+                    continue
                 fi
             else
                 # Distinguish a real error (rate-limited, captcha-gated, API
@@ -1094,6 +1195,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         provider_record "$_fb_src" ok
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
+                    gap_state "$al_id" "$ep_no" clear
+                        gap_state "$al_id" "$ep_no" clear
                         set_watermark "$al_id" "$ep_no"
                         # Same bump anilist_sync.py itself relies on for the
                         # allanime path (see trusted_id above) - skip it here
@@ -1110,9 +1213,8 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                     fi
                 fi
 
-                printf "\33[2K\r\033[1;33m  %s for episode %s, stopping this show here\033[0m\n" "$_reason" "$ep_no" >&2
-                printf "failed\t%s\t%s\t%s\n" "$al_title" "$ep_no" "$_reason" >>"$results_tmp"
-                break
+                handle_episode_failure "$al_title" "$al_id" "$ep_no" "$_reason" || break
+                continue
             fi
             rm -f "$_err_file"
         done
@@ -1122,7 +1224,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
     python3 -c "
 import json, sys
 path, out = sys.argv[1], sys.argv[2]
-shows, downloaded, failed, skipped = {}, 0, 0, 0
+shows, downloaded, failed, skipped, gaps = {}, 0, 0, 0, 0
 with open(path) as f:
     for line in f:
         parts = line.rstrip('\n').split('\t')
@@ -1137,16 +1239,22 @@ with open(path) as f:
         if status == 'ok':
             entry['episodes'].append(int(ep))
             downloaded += 1
+        elif status == 'gap':
+            # written off for now, not broken: the show carried on past it and
+            # the episode is retried every run. Reported separately so a gap
+            # never hides inside the failure count.
+            entry.setdefault('gaps', []).append(int(float(ep)))
+            gaps += 1
         else:
             entry['errors'].append(reason or ep or 'failed')
             failed += 1
 shows_list = []
 for e in shows.values():
-    e['status'] = 'downloaded' if e['episodes'] else 'failed'
+    e['status'] = 'downloaded' if e['episodes'] else ('gap' if e.get('gaps') else 'failed')
     if e['status'] == 'failed':
         e['detail'] = e['errors'][0] if e['errors'] else 'failed'
     shows_list.append(e)
-json.dump({'stats': {'downloaded': downloaded, 'failed': failed, 'skipped': skipped}, 'shows': shows_list}, open(out, 'w'), indent=2)
+json.dump({'stats': {'downloaded': downloaded, 'failed': failed, 'skipped': skipped, 'gaps': gaps}, 'shows': shows_list}, open(out, 'w'), indent=2)
 " "$results_tmp" "$fallback_summary"
     rm -f "$results_tmp"
 
