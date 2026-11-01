@@ -84,10 +84,12 @@ pipeline {
             }
         }
 
-        // ani-cli is the sync driver (since 2026-08-09). It tries each
-        // provider in $providers in turn, so no single site going down stops
-        // the pipeline. It writes summary.json in the {"stats":..,"shows":[..]}
-        // shape every notification and grading path below expects.
+        // anime_sync.py is the sync driver (since 2026-11-01, replacing the
+        // ani-cli shell script). It tries each provider in ANI_CLI_PROVIDERS
+        // in turn, so no single site going down stops the pipeline, and writes
+        // summary.json in the {"stats":..,"shows":[..]} shape every
+        // notification and grading path below expects. The provider helpers
+        // are unchanged - it drives the same 3-verb CLI contract.
         stage('sync') {
             steps {
                 // The old crontab chained with `;` so the consolidator ran even when
@@ -110,10 +112,10 @@ pipeline {
                         ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
                         ANI_CLI_FALLBACK_SUMMARY="$(pwd)/summary.json" \
                         ANI_CLI_SKIP_CONSOLIDATE=1 \
-                        ./ani-cli --sync
+                        python3 anime_sync.py
                     '''
                 }
-                // ani-cli exits 0 even when individual shows fail, so the shell
+                // anime_sync exits 0 even when individual shows fail, so the shell
                 // result alone reports a green build over a broken sync. Grade the
                 // build on what actually happened.
                 script {
