@@ -104,8 +104,10 @@ def sync_env(cfg: dict) -> dict:
     env = dict(os.environ)
     env["ANIME_ROOT"] = cfg.get("anime_root", "")
     env["ANI_CLI_ALLANIME_HELPER"] = str(HERE / "ani-cli-allanime.py")
-    env["ANI_CLI_ANIDB_HELPER"] = str(HERE / "ani-cli-anidb.py")
     env["ANI_CLI_ANIMEHUB_HELPER"] = str(HERE / "ani-cli-animehub.py")
+    env["ANI_CLI_ANIMEGG_HELPER"] = str(HERE / "ani-cli-animegg.py")
+    env["ANI_CLI_NINEANIME_HELPER"] = str(HERE / "ani-cli-nineanime.py")
+    env["ANI_CLI_ANIKOTO_HELPER"] = str(HERE / "ani-cli-anikoto.py")
     env["ANI_CLI_CONSOLIDATOR"] = str(CONSOLIDATOR)
     if cfg.get("watchlist"):
         env["ANI_CLI_MAIN_WATCHLIST"] = cfg["watchlist"]
@@ -123,14 +125,16 @@ def doctor(cfg: dict) -> bool:
         if not good:
             ok = False
 
-    for mod in ("anipy_api", "curl_cffi", "m3u8", "yaml"):
+    for mod in ("anipy_api", "curl_cffi", "yaml"):
         try:
             __import__(mod)
             add(f"python: {mod}", True, "importable")
         except ImportError:
             add(f"python: {mod}", False, f"pip install {'pyyaml' if mod == 'yaml' else mod}")
 
-    for exe, why in (("yt-dlp", "downloader"), ("ffmpeg", "muxing fallback"), ("python3", "required")):
+    for exe, why in (("yt-dlp", "downloader"), ("ffmpeg", "muxing fallback"),
+                     ("ffprobe", "duration guard - without it bad files are accepted"),
+                     ("python3", "required")):
         p = shutil.which(exe)
         add(f"binary: {exe}", bool(p), p or f"missing ({why})")
 
@@ -230,7 +234,8 @@ def run_sync(cfg: dict, consolidate: bool = True) -> None:
 
 def cron_line(cfg: dict) -> str:
     env = sync_env(cfg)
-    keys = ("ANIME_ROOT", "ANI_CLI_ALLANIME_HELPER", "ANI_CLI_ANIDB_HELPER",
+    keys = ("ANIME_ROOT", "ANI_CLI_ALLANIME_HELPER", "ANI_CLI_ANIMEGG_HELPER",
+            "ANI_CLI_NINEANIME_HELPER", "ANI_CLI_ANIKOTO_HELPER",
             "ANI_CLI_ANIMEHUB_HELPER", "ANI_CLI_CONSOLIDATOR", "ANI_CLI_MAIN_WATCHLIST")
     assigns = " ".join(f'{k}="{env[k]}"' for k in keys if env.get(k))
     log = Path.home() / ".local/state/ani-cli/sync.log"

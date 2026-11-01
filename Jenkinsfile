@@ -69,34 +69,25 @@ pipeline {
                 // rich/pyyaml are imported directly by the scripts and are NOT
                 // guaranteed transitive deps of anipy — pin them here explicitly.
                 // yt-dlp is for ani-cli's downloads (ffmpeg alone can't handle
-                // every embed host's auth/HLS quirks). curl_cffi is for
-                // ani-cli-anidb.py - anidb.app sits behind Cloudflare and plain
-                // requests/curl gets the JS challenge.
+                // every embed host's auth/HLS quirks). curl_cffi gives the
+                // scrapers browser TLS, which several of them need to get past
+                // Cloudflare.
                 //
-                // anipy-api is PINNED, deliberately. It is no longer the sync
-                // driver (see the sync stage) - it is kept only because
-                // ani-cli-allanime.py imports AllAnimeProvider from it directly.
-                // An unpinned `--upgrade` here is what silently broke this job
-                // on 2026-08-08: 3.9.0 dropped 'allanime' from its provider
-                // registry, so anilist_sync.py failed all 15 shows with
-                // "Provider 'allanime' not found" every run for a day. Never
-                // let an unattended pipeline float its own dependency.
+                // anipy-api is PINNED, deliberately. It is not the sync driver
+                // - it provides ani-cli-allanime.py (episode lists) and
+                // ani-cli-animehub.py (a provider). An unpinned `--upgrade`
+                // here is what silently broke this job on 2026-08-08: 3.9.0
+                // dropped 'allanime' from its provider registry and every show
+                // failed for a day. Never let an unattended pipeline float its
+                // own dependency.
                 sh 'pip install --user --break-system-packages anipy-api==3.9.0 && pip install --user --break-system-packages --upgrade rich pyyaml yt-dlp curl_cffi'
             }
         }
 
-        // ani-cli is the sync driver as of 2026-08-09, replacing anilist_sync.py.
-        // anipy-api 3.9.0 removed 'allanime' from its provider registry, so
-        // anilist_sync.py (which resolves providers by name) errored on every
-        // show. ani-cli reaches AllAnime by importing the provider class
-        // directly, which still works, and falls back to anidb.app when the
-        // site itself is captcha-gated - so it survives both failure modes that
-        // have taken this job down. anilist_sync.py is kept in the repo but is
-        // no longer wired in; see README for re-enabling it.
-        //
-        // It writes summary.json in the same {"stats":..,"shows":[..]} shape
-        // anilist_sync.py did, so every notification/grading path below is
-        // unchanged.
+        // ani-cli is the sync driver (since 2026-08-09). It tries each
+        // provider in $providers in turn, so no single site going down stops
+        // the pipeline. It writes summary.json in the {"stats":..,"shows":[..]}
+        // shape every notification and grading path below expects.
         stage('sync') {
             steps {
                 // The old crontab chained with `;` so the consolidator ran even when
@@ -113,14 +104,16 @@ pipeline {
                         PATH="$HOME/.local/bin:$PATH" \
                         ANI_CLI_ALLANIME_HELPER="$(pwd)/ani-cli-allanime.py" \
                         ANI_CLI_ANIMEHUB_HELPER="$(pwd)/ani-cli-animehub.py" \
-                        ANI_CLI_ANIDB_HELPER="$(pwd)/ani-cli-anidb.py" \
+                        ANI_CLI_ANIMEGG_HELPER="$(pwd)/ani-cli-animegg.py" \
+                        ANI_CLI_NINEANIME_HELPER="$(pwd)/ani-cli-nineanime.py" \
+                        ANI_CLI_ANIKOTO_HELPER="$(pwd)/ani-cli-anikoto.py" \
                         ANI_CLI_MAIN_WATCHLIST="$(pwd)/watchlist.json" \
                         ANI_CLI_FALLBACK_SUMMARY="$(pwd)/summary.json" \
                         ANI_CLI_SKIP_CONSOLIDATE=1 \
                         ./ani-cli --sync
                     '''
                 }
-                // anilist_sync exits 0 even when individual shows fail, so the shell
+                // ani-cli exits 0 even when individual shows fail, so the shell
                 // result alone reports a green build over a broken sync. Grade the
                 // build on what actually happened.
                 script {

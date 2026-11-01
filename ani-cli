@@ -150,23 +150,6 @@ allanime_video() {
     python3 "$allanime_helper" video "$1" "$2" "$3"
 }
 
-# anidb.app - second-chance provider, tried only when AllAnime itself is down
-# (NEED_CAPTCHA / AA_CRYPTO_STALE). Different site, different id space -
-# always blind-searched by title, never trusted the way a watchlist-sourced
-# allanime id is (see trusted_id below), so it never writes to main_watchlist.
-anidb_helper="${ANI_CLI_ANIDB_HELPER:-$_self_dir/ani-cli-anidb.py}"
-
-anidb_search() {
-    python3 "$anidb_helper" search "$1"
-}
-
-anidb_episodes() {
-    python3 "$anidb_helper" episodes "$1" "$2"
-}
-
-anidb_video() {
-    python3 "$anidb_helper" video "$1" "$2" "$3"
-}
 
 # animehub - added 2026-09-06, tried before anidb. anipy-api's own AllAnime
 # replacement, so no new dependency. Numbers episodes per-season from 1 like
@@ -209,23 +192,6 @@ anikoto_subs() {
     python3 "$anikoto_helper" subs "$1" "$2" "$3"
 }
 
-# animeheaven.me - fifth provider, added 2026-09-14. Simplest of the lot:
-# plain progressive MP4s, no HLS or encryption. Added when the other four
-# simultaneously could not serve five shows (AllAnime dead, anidb 503 for a
-# week, animehub never carried them, anikoto's host went encrypted).
-animeheaven_helper="${ANI_CLI_ANIMEHEAVEN_HELPER:-$_self_dir/ani-cli-animeheaven.py}"
-
-animeheaven_search() {
-    python3 "$animeheaven_helper" search "$1"
-}
-
-animeheaven_episodes() {
-    python3 "$animeheaven_helper" episodes "$1" "$2"
-}
-
-animeheaven_video() {
-    python3 "$animeheaven_helper" video "$1" "$2" "$3"
-}
 
 # animegg.org - sixth provider, added 2026-10-16. Progressive MP4s with real
 # quality labels, no HLS or encryption. Added when every other provider had
@@ -260,7 +226,7 @@ animegg_video() {
 #               subtitle source while leaving the video rotation.
 #
 # Each helper is still on disk; add a name back here to re-enable it.
-providers="${ANI_CLI_PROVIDERS:-animehub animegg nineanime}"
+providers="${ANI_CLI_PROVIDERS:-nineanime animegg animehub}"
 
 # EPISODE GAPS
 #
@@ -373,31 +339,6 @@ os.replace(tmp, path)
 " "$provider_health" "$1" "$2" 2>/dev/null
 }
 
-# $1 provider. Exit 0 = try it, 1 = retired, skip it this run.
-# Dead means: no success for $provider_dead_days, measured from the last
-# success (or from the first failure if it never worked at all). A retired
-# provider is still re-probed once a day, so a site that comes back rejoins
-# on its own - retirement must not be a one-way door, because sites here do
-# return (and the whole point is surviving churn, not pruning once).
-provider_enabled() {
-    [ -f "$provider_health" ] || return 0
-    python3 -c "
-import json, sys, time
-path, prov, dead_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
-try:
-    e = json.load(open(path)).get(prov) or {}
-except (FileNotFoundError, json.JSONDecodeError):
-    sys.exit(0)
-now = time.time()
-since = e.get('last_ok') or e.get('first_fail')
-if since is None:
-    sys.exit(0)                                   # nothing recorded yet
-if (now - since) / 86400 < dead_days:
-    sys.exit(0)                                   # still within the window
-last_try = e.get('last_try') or 0
-sys.exit(0 if (now - last_try) > 86400 else 1)    # retired: daily re-probe
-" "$provider_health" "$1" "$provider_dead_days" 2>/dev/null
-}
 
 # 9anime - seventh provider, added 2026-10-18 for NEW-EPISODE latency
 # rather than coverage. animegg is reliable for back catalogue but lags on
@@ -476,6 +417,12 @@ pick_match() {
 # meant a third copy.
 provider_links() {
     _pl_prov="$1"; _pl_ep="$3"; _pl_want_exact="${4:-0}"
+    # $_fb_err belongs to the caller and is unset when provider_links is
+    # reached via later_episode_exists: every `2>>"$_fb_err"` below then
+    # failed with "cannot create" and the command substitution yielded
+    # nothing, so a broken redirect looked exactly like "this provider does
+    # not have the show". Fall back to discarding rather than to breakage.
+    [ -n "$_fb_err" ] || _fb_err=/dev/null
     _pl_title=$(resolve_provider_title "$_pl_prov" "$2")
     _pl_cands=$(pick_match "$("${_pl_prov}_search" "$_pl_title" 2>>"$_fb_err")" "$_pl_title")
     [ -z "$_pl_cands" ] && return 1
@@ -489,26 +436,13 @@ provider_links() {
         # episodes, but came second, so the short version won and quietly
         # landed in the library as episode 9.
         [ "$_pl_want_exact" = 1 ] && [ "$_pl_exact" != 1 ] && continue
-        # anidb numbers some cours absolutely (BLEACH 41-44, Re:ZERO 67-78)
-        # while AniList restarts at 1; the others match AniList directly.
-        if [ "$_pl_prov" = "anidb" ]; then
-            _pl_n=$(anidb_episode_for "$_pl_id" "$_pl_ep" "$_pl_exact" 2>>"$_fb_err")
-            [ -z "$_pl_n" ] && continue
-            [ "$_pl_n" != "$_pl_ep" ] && info "  anidb numbers this cour absolutely: episode $_pl_ep is $_pl_n there" >&2
-        else
-            _pl_n="$_pl_ep"
-            "${_pl_prov}_episodes" "$_pl_id" sub 2>>"$_fb_err" | grep -qx "$_pl_ep" || continue
-        fi
+        _pl_n="$_pl_ep"
+        "${_pl_prov}_episodes" "$_pl_id" sub 2>>"$_fb_err" | grep -qx "$_pl_ep" || continue
         _pl_links=$("${_pl_prov}_video" "$_pl_id" "$_pl_n" sub 2>>"$_fb_err" | sort -g -r -s)
         [ -n "$_pl_links" ] && printf "%s\n" "$_pl_links" && break
     done
 }
 
-# $1 id, $2 our episode number, $3 exact-title-match flag. Prints anidb's
-# number for that episode, or nothing if it can't map it confidently.
-anidb_episode_for() {
-    python3 "$anidb_helper" episode-for "$1" "$2" "$3"
-}
 
 # select the quality according to the setting
 select_quality() {
@@ -747,13 +681,23 @@ fallback_summary="${ANI_CLI_FALLBACK_SUMMARY:-${hist_dir:-${XDG_STATE_HOME:-$HOM
 
 # $1 al_id  $2 episode - ani-cli's own watermark, flat {id: ep}
 set_watermark() {
+    # tmp + rename like every other state writer here. This one truncated in
+    # place with no try/except: a crash mid-write, or an already-corrupt file,
+    # made every later call raise - and the exit status is discarded at the
+    # call sites, so the job would silently re-download the same episodes
+    # every two hours forever.
     python3 -c "
-import json, sys
+import json, os, sys
 p, k, v = sys.argv[1], sys.argv[2], int(sys.argv[3])
-d = json.load(open(p))
+try:
+    d = json.load(open(p))
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
 d[k] = v
-json.dump(d, open(p, 'w'), indent=2)
-" "$sync_state" "$1" "$2"
+tmp = p + '.tmp'
+json.dump(d, open(tmp, 'w'), indent=2)
+os.replace(tmp, p)
+" "$sync_state" "$1" "$2" || printf "\33[2K\r\033[1;31m  WARNING: could not record watermark for %s ep %s\033[0m\n" "$1" "$2" >&2
 }
 
 # $1 al_id  $2 episode - anipy-api's shared watchlist. Upward-only, never
@@ -785,9 +729,13 @@ has_season_marker() {
 
 resolve_folder() {
     _title="$1"
-    _alias_file="$anime_root/aliases.yaml"
-    if [ -f "$_alias_file" ]; then
-        _mapped=$(sed -nE "s|^\"?${_title}\"?:[[:space:]]*\"?([^\"]+)\"?[[:space:]]*\$|\1|p" "$_alias_file" | head -n 1)
+    # Looked up with awk string comparison, not a sed regex built from the
+    # title: titles contain regex metacharacters, so "[Oshi no Ko] Season 2"
+    # and "Fate/stay night: Unlimited Blade Works (TV)" both silently matched
+    # nothing and fell through to the sanitized title. Both are real entries
+    # in this library. alias_lookup already does this correctly.
+    if [ -f "$anime_root/aliases.yaml" ]; then
+        _mapped=$(alias_lookup "$_title" aliases.yaml)
         # Never let an alias strip the season. aliases.yaml is shared with the
         # consolidator, where mapping "X Season 4" -> "X" is exactly right (it
         # is the folder->canonical map). Here it is not: the download folder
@@ -818,7 +766,7 @@ resolve_anidb_title() {
 # per-provider keys contain '|', so every sed delimiter collides with real
 # data. Tries each ':' in turn as the key/value split.
 alias_lookup() {
-    _al_file="$anime_root/anidb_aliases.yaml"
+    _al_file="$anime_root/${2:-anidb_aliases.yaml}"
     [ -f "$_al_file" ] || return 0
     awk -v want="$1" '
         /^[[:space:]]*#/ { next }
@@ -1035,8 +983,31 @@ print(e['identifier'] if e and e.get('provider') == 'allanime' and e.get('identi
             continue
         fi
 
-        # anidb_only already built ep_list from anidb's own list above
-        [ "$anidb_only" = 0 ] && ep_list="$(allanime_episodes "$anime_id" sub | sort -n)"
+        # Episode list. AllAnime is asked first because it still answers and
+        # its numbering matches AniList - but it is NOT allowed to be the only
+        # source. When it stops answering (its video call already died this
+        # way) an empty ep_list makes the loop body never run, the show reports
+        # "skip", the job reads as idle, and scheduled runs notify nothing: a
+        # total outage with no alert. Fall through to whoever does answer.
+        if [ "$anidb_only" = 0 ]; then
+            ep_list="$(allanime_episodes "$anime_id" sub 2>/dev/null | sort -n)"
+            if [ -z "$ep_list" ]; then
+                for _p in $providers; do
+                    _pt=$(resolve_provider_title "$_p" "$al_title")
+                    _n=$("${_p}_episodes" "$(pick_match "$("${_p}_search" "$_pt" 2>/dev/null)" "$_pt" | cut -f 1)" sub 2>/dev/null | grep -c .)
+                    if [ "$_n" -gt 0 ] 2>/dev/null; then
+                        ep_list=$(seq 1 "$_n")
+                        info "  allanime gave no episode list; using $_p ($_n episodes)"
+                        break
+                    fi
+                done
+            fi
+            if [ -z "$ep_list" ]; then
+                printf "\33[2K\r\033[1;31m  no provider returned an episode list for %s\033[0m\n" "$al_title" >&2
+                printf "failed\t%s\t\tno episode list from any provider\n" "$al_title" >>"$results_tmp"
+                continue
+            fi
+        fi
         last=$(python3 -c "
 import json, sys
 def last_dl(path, key):
@@ -1071,6 +1042,19 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
         # Recorded gaps come first and bypass the watermark - they are by
         # definition below it. A gap that now downloads clears itself, so a
         # hole heals as soon as any provider publishes the episode.
+        # A watermark above every episode the provider lists means the two are
+        # in different numbering spaces - AniList switched the entry to
+        # absolute numbering, or the watermark was written from a provider
+        # that numbers differently. Nothing is ever > last, so the show
+        # reports "skip" and reads as UP TO DATE forever. That silence cost
+        # seven weeks on Slime S4. Report it instead of swallowing it.
+        _max_ep=$(printf "%s\n" $ep_list | sort -g | tail -n 1)
+        if [ -n "$_max_ep" ] && awk -v a="$last" -v b="$_max_ep" 'BEGIN{exit !(a>b)}' 2>/dev/null; then
+            printf "\33[2K\r\033[1;31m  watermark %s is past every listed episode (max %s) - numbering mismatch, not up to date\033[0m\n" "$last" "$_max_ep" >&2
+            printf "failed\t%s\t%s\twatermark %s exceeds provider max %s (numbering mismatch)\n" "$al_title" "$_max_ep" "$last" "$_max_ep" >>"$results_tmp"
+            continue
+        fi
+
         _gap_eps=$(gaps_for "$al_id")
         [ -n "$_gap_eps" ] && info "  retrying recorded gap(s): $_gap_eps"
 
@@ -1133,12 +1117,14 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                 # wrong-show match here never reaches main_watchlist anyway).
                 anidb_links=""
                 case "$_reason" in
-                    # anipy_api wraps both NEED_CAPTCHA and AA_CRYPTO_STALE as
-                    # "Server responded with unknown error: <code>" - a real
-                    # site-side outage, unlike "not released yet". The second
-                    # pattern is the anidb_only path, where there is no
-                    # allanime id to have asked in the first place.
-                    *"unknown error"* | *"no allanime match"*)
+                    # ANY failure, not a specific error string. This matched
+                    # only *"unknown error"* (anipy's wrapper for NEED_CAPTCHA
+                    # and AA_CRYPTO_STALE), so a PersistedQueryNotFound, a
+                    # timeout, a DNS failure, or an empty source list - which
+                    # becomes "not released yet" - all silently skipped the
+                    # only working providers and reported the show as failed
+                    # or unreleased. AllAnime is a first try, never a gate.
+                    *)
                         _fb_err=$(mktemp)
 
                         # Try each provider in turn. Order is deliberate:
@@ -1180,7 +1166,7 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         if [ -z "$anidb_links" ] && [ -s "$_fb_err" ]; then
                             printf "\33[2K\r\033[1;33m  fallback also failed: %s\033[0m\n" "$(tail -1 "$_fb_err")" >&2
                         fi
-                        rm -f "$_fb_err"
+                        rm -f "$_fb_err"; _fb_err=""
                         ;;
                 esac
 
@@ -1208,17 +1194,17 @@ print(max(last_dl(path, key), last_dl(main_path, key)))
                         last="$ep_no"
                         printf "ok\t%s\t%s\n" "$al_title" "$ep_no" >>"$results_tmp"
                     gap_state "$al_id" "$ep_no" clear
-                        gap_state "$al_id" "$ep_no" clear
                         set_watermark "$al_id" "$ep_no"
                         # Same bump anilist_sync.py itself relies on for the
                         # allanime path (see trusted_id above) - skip it here
                         # and anilist_sync.py has no idea this episode already
                         # landed, so it retries the same show against AllAnime
                         # (still down) on every future run forever. Gated on
-                        # anidb_exact, not just "found a result", for the same
-                        # reason as trusted_id: only an exact title match is
-                        # confident enough to be the right show.
-                        [ "$anidb_exact" = 1 ] && bump_main_watchlist "$al_id" "$ep_no"
+                        # NOTE: this used to read [ "$anidb_exact" = 1 ], a
+                        # variable never assigned anywhere in this file, so the
+                        # write-back never fired. provider_links keeps its
+                        # exactness flag in a subshell, so it cannot reach here;
+                        # the once-per-run reconcile above covers this instead.
                         continue
                     else
                         provider_record "$_fb_src" fail
