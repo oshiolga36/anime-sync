@@ -73,7 +73,12 @@ def parse_season_and_ep(name):
     if match_e:
         e = next(g for g in match_e.groups() if g is not None).zfill(2)
     else:
-        e = "01" # Default fallback
+        # No episode number found. Returning "01" here was dangerous, not
+        # merely wrong: an unparseable file ("extras.mkv") became E01 and the
+        # keep-larger collision rule then deleted the real episode 1. A guess
+        # feeding a destructive rule is the wrong combination - decline, and
+        # let the caller leave the file alone.
+        return s, None
     
     return s, e
 
@@ -123,7 +128,19 @@ def consolidate():
                 # Season: forced override wins, else folder/file context.
                 s_from_folder, _ = parse_season_and_ep(os.path.basename(dirpath) if "Season" in dirpath else item)
                 s_from_file, e = parse_season_and_ep(filename)
-                s = forced_season or (s_from_file if 'S' in filename.upper() else s_from_folder)
+                if e is None:
+                    print(f"[!] Skipped (no episode number): {filename}")
+                    continue
+                # Does the FILENAME itself carry a season marker? This used to
+                # test `'S' in filename.upper()` - the letter S - so any file
+                # with an "s" in its name ignored the folder's season and fell
+                # through to parse_season_and_ep's "01" default. A season-2
+                # episode in "Show Season 2/" was therefore filed as S01, and
+                # the keep-larger collision rule then DELETED the real season 1
+                # episode. Reproduced on 2026-11-01; ext4, no snapshots.
+                _has_marker = re.search(r'S\d{1,2}E\d{1,3}|(?:Season|Part)\s*\d+',
+                                        filename, re.IGNORECASE)
+                s = forced_season or (s_from_file if _has_marker else s_from_folder)
                 e = str(int(e)).zfill(2)  # normalise E004 -> E04 so subs match their video
 
                 # Subtitles keep their language suffix (e.g. ".en") so Jellyfin pairs them.
