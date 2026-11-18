@@ -30,6 +30,7 @@ import base64
 import html as _html
 import re
 import sys
+from urllib.parse import urljoin
 
 from curl_cffi import requests
 
@@ -115,7 +116,8 @@ def cmd_video(slug: str, episode: str, lang: str) -> None:
             continue
         m = re.search(r'src="([^"]+)"', decoded)
         if m:
-            embeds.append(_html.unescape(m.group(1)))
+            # vidmoly now serves protocol-relative "//vidmoly.net/..." embeds
+            embeds.append(urljoin(ep_url, _html.unescape(m.group(1))))
     if not embeds:
         raise RuntimeError(f"no servers listed for episode {episode}")
 
